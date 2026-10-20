@@ -4,7 +4,7 @@
 企业微信群机器人（webhook）推送客户端 · wecom_notifier
 =====================================================================
 零强制依赖（requests / Pillow 为可选增强），配一个 key 即可推送。
-详细用法见同目录《wecom_notifier使用文档.md》。
+详细用法见同目录《README.md》。
 
 最快上手
 ---------------------------------------------------------------------
@@ -19,7 +19,7 @@
     image     本地 JPEG/PNG，超限自动压缩到 2MB
     file      群文件，5B~20MB
 内容参数三种写法：字面内容 / '-' 读 stdin / '@文件路径' 读文件。
-公共参数：--key --webhook --secret --timeout --dry-run -v（各子命令 --help 查看）。
+公共参数：--key --webhook --secret --timeout --rate --dry-run -v（各子命令 --help 查看）。
 
 Python 调用
 ---------------------------------------------------------------------
@@ -37,8 +37,9 @@ Python 调用
   · 所有发送方法返回 SendResult(ok, errcode, errmsg)，可用 if 直接判断；
     模块级函数返回 (ok, err) 元组。
   · 网络 / 接口错误不抛异常，收敛为失败 SendResult；仅输入不合法抛 WeComError。
-  · 文本超 max_bytes（默认 4096B）自动按 UTF-8 字节截断，图片超 2MB 自动压缩。
-  · 机器人限频 20 条/分钟，批量推送请自行控制节奏。
+  · text 正文上限 2048B、markdown 上限 4096B，超限按 UTF-8 字节安全截断并告警。
+  · 图片超 2MB 自动压缩；PNG 过大会转 JPEG 重试。
+  · 机器人限频 20 条/分钟，可用 min_interval / --rate 自动节流。
 
 配置优先级（高 → 低）
 ---------------------------------------------------------------------
@@ -59,12 +60,19 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+try:                                    # 可选增强：有 requests 就用它的连接池
+    import requests as _requests        # type: ignore
+except ImportError:                     # pragma: no cover - 无 requests 环境
+    _requests = None                    # type: ignore
 
 __all__ = [
     "WeComBot", "SendResult", "WeComError",
@@ -72,7 +80,7 @@ __all__ = [
     "gen_signature", "resolve_webhook", "prepare_image", "main",
 ]
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 # ── 类型别名 ────────────────────────────────────────────────────────── #
 JsonDict = Dict[str, Any]                 # 接口返回的 JSON 对象
@@ -81,8 +89,10 @@ Payload = Dict[str, Any]                  # 待发送的 webhook 请求体
 # ── 官方网关与常量 ──────────────────────────────────────────────────── #
 BASE_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send"
 UPLOAD_URL = "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media"
+HELP_URL = "https://open.work.weixin.qq.com/devtool/query?e={errcode}"
 
-FALLBACK_KEY = "YOUR_WECOM_BOT_KEY_HERE"  # 占位符：切勿在此填入真实 key 并提交到版本库
+# 只允许往企微官方域名发请求，避免把 key 拼进任意 URL 变成 SSRF 跳板
+ALLOWED_HOSTS = ("qyapi.weixin.qq.com",)
 
 ENV_WEBHOOK = "WECOM_WEBHOOK"
 ENV_KEY = "WECOM_WEBHOOK_KEY"
@@ -91,7 +101,8 @@ ENV_SECRET = "WECOM_SECRET"
 ENV_TIMEOUT = "WECOM_TIMEOUT"
 
 DEFAULT_TIMEOUT = 8.0
-DEFAULT_MAX_BYTES = 4096                    # text/markdown content 字节上限
+DEFAULT_MAX_BYTES = 4096                    # markdown content 字节上限
+TEXT_MAX_BYTES = 2048                       # text content 字节上限（企微硬限制）
 DEFAULT_IMAGE_MAX_BYTES = 2 * 1024 * 1024   # image base64 上限（企微硬限制）
 MAX_FILE_BYTES = 20 * 1024 * 1024           # 群文件上限 20MB
 MIN_FILE_BYTES = 5                          # 群文件下限 5B
@@ -99,41 +110,108 @@ ALLOWED_IMAGE_MIMES = ("image/jpeg", "image/png")
 MAX_COMPRESS_ROUNDS = 12                    # 图片自动压缩的最大迭代轮数
 MAX_CARD_ITEMS = 6                          # 模板卡片最多展示的 key-value 项数
 DEFAULT_CARD_URL = "https://work.weixin.qq.com/"
+RATE_LIMIT_ERRCODE = 45009                  # 触发 20 条/分钟限频
+RETRYABLE_ERRCODES = frozenset({-1, RATE_LIMIT_ERRCODE})
+MIN_INTERVAL_LIMIT = 3.0                    # 20 条/分钟 → 建议最小间隔 3 秒
 
-_SSL_CTX = ssl.create_default_context()
+# 图片魔数 → (MIME, Pillow 格式名)；用于挡住「扩展名改一下」的假图片
+_IMAGE_MAGIC: Tuple[Tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+)
+
+_THREAD_LOCAL = threading.local()
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """惰性构造 SSL 上下文（import 时不碰系统证书库，精简环境也不炸）。"""
+    context = getattr(_THREAD_LOCAL, "ssl_context", None)
+    if context is None:
+        try:
+            context = ssl.create_default_context()
+        except Exception:                       # pragma: no cover - 极端精简环境
+            context = ssl._create_unverified_context()  # noqa: SLF001
+        _THREAD_LOCAL.ssl_context = context
+    return context
+
+
+def _requests_session() -> Any:
+    """每个线程复用一个 requests.Session，真正用上连接池。"""
+    session = getattr(_THREAD_LOCAL, "session", None)
+    if session is None:
+        session = _requests.Session()           # type: ignore[union-attr]
+        _THREAD_LOCAL.session = session
+    return session
 
 
 # ===================================================================== #
 # 统一日志输出（信息/成功走 stdout，警告/错误走 stderr）
 # ===================================================================== #
+def _supports_unicode(stream: Any) -> bool:
+    """判断输出流能否编码 emoji 图标（Windows GBK 控制台不能）。"""
+    encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+    if encoding in ("", "utf8", "utf_8"):
+        return True
+    try:
+        "❌".encode(encoding)
+        return True
+    except (LookupError, UnicodeEncodeError):
+        return False
+
+
+def _safe_print(text: str, stream: Any) -> None:
+    """打印时对无法编码的字符降级为 '?'，绝不让编码问题把程序打崩。"""
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        print(text.encode(encoding, "replace").decode(encoding, "replace"), file=stream)
+
+
+def _emit(level: str, message: str) -> None:
+    """统一输出：error / warn 走 stderr，其余走 stdout。"""
+    stream = sys.stderr if level in ("error", "warn") else sys.stdout
+    icon = {"error": "❌ ", "warn": "⚠️ "}.get(level, "") if _supports_unicode(stream) else ""
+    _safe_print(f"[wecom] {icon}{message}", stream)
+
+
 def _log_info(message: str) -> None:
     """普通信息，写 stdout。"""
-    print(f"[wecom] {message}")
+    _emit("info", message)
 
 
 def _log_warn(message: str) -> None:
-    """警告（不影响执行，如回退到演示 key），写 stderr。"""
-    print(f"[wecom] ⚠️ {message}", file=sys.stderr)
+    """警告（不影响执行，如内容被截断），写 stderr。"""
+    _emit("warn", message)
 
 
 def _log_error(message: str) -> None:
     """错误（会导致本次推送失败），写 stderr。"""
-    print(f"[wecom] ❌ {message}", file=sys.stderr)
+    _emit("error", message)
 
 
 def _log_dry_run(payload: Payload) -> None:
-    """打印 dry-run 模式下的请求体（截断展示，避免刷屏）。"""
-    print("[dry-run] 将发送:", json.dumps(payload, ensure_ascii=False)[:500])
+    """打印 dry-run 模式下的请求体。
+
+    图片 base64 换成体积占位符，避免一整屏乱码和分享日志时的数据外泄。
+    """
+    preview = json.loads(json.dumps(payload, ensure_ascii=False))
+    image = preview.get("image")
+    if isinstance(image, dict) and "base64" in image:
+        image["base64"] = f"<base64 {len(image['base64'])} 字符已省略>"
+    _safe_print("[dry-run] 将发送: " + json.dumps(preview, ensure_ascii=False), sys.stdout)
 
 
 def _report_success(name: str) -> None:
     """CLI 结果行：单条推送成功。"""
-    print(f"✅ 已发送: {name}")
+    _safe_print(f"✅ 已发送: {name}" if _supports_unicode(sys.stdout) else f"已发送: {name}",
+                sys.stdout)
 
 
 def _report_failure(name: str, result: "SendResult") -> None:
     """CLI 结果行：单条推送失败。"""
-    print(f"❌ 发送失败: {name} -> {result}")
+    _safe_print(f"❌ 发送失败: {name} -> {result}" if _supports_unicode(sys.stdout)
+                else f"发送失败: {name} -> {result}", sys.stdout)
 
 
 def _describe_exception(exc: BaseException) -> str:
@@ -155,24 +233,36 @@ class SendResult:
     ok: bool
     errcode: Optional[int] = None
     errmsg: str = ""
+    status: Optional[int] = None    # HTTP 状态码（有响应时才有）
 
     @classmethod
-    def success(cls, errmsg: str = "") -> "SendResult":
+    def success(cls, errmsg: str = "", status: Optional[int] = None) -> "SendResult":
         """构造成功结果。"""
-        return cls(True, 0, errmsg)
+        return cls(True, 0, errmsg, status)
 
     @classmethod
-    def failure(cls, errmsg: str, errcode: Optional[int] = None) -> "SendResult":
+    def failure(cls, errmsg: str, errcode: Optional[int] = None,
+                status: Optional[int] = None) -> "SendResult":
         """构造失败结果。"""
-        return cls(False, errcode, errmsg)
+        return cls(False, errcode, errmsg, status)
 
     def __bool__(self) -> bool:
         return self.ok
 
+    @property
+    def retryable(self) -> bool:
+        """是否值得重试：网络异常、限频、5xx。"""
+        if self.ok:
+            return False
+        if self.errcode in RETRYABLE_ERRCODES:
+            return True
+        return self.status is not None and 500 <= self.status < 600
+
     def __repr__(self) -> str:
         if self.ok:
             return "SendResult(ok=True)"
-        return f"SendResult(ok=False, errcode={self.errcode}, errmsg={self.errmsg!r})"
+        extra = f", status={self.status}" if self.status is not None else ""
+        return f"SendResult(ok=False, errcode={self.errcode}, errmsg={self.errmsg!r}{extra})"
 
 
 # ===================================================================== #
@@ -201,40 +291,47 @@ def mask_url(url: str) -> str:
     if "key=" in url:
         prefix, _, tail = url.partition("key=")
         key = tail.split("&")[0]
-        return f"{prefix}key={key[:6]}***(已隐去)"
+        shown = key[:6] + "***" if len(key) > 6 else "***"
+        return f"{prefix}key={shown}(已隐去)"
     return url
 
 
 def _as_webhook_url(value: str) -> str:
     """把「完整地址」或「纯 key」统一成完整 webhook 地址。
 
-    以 http(s):// 开头的值按完整地址处理（必须自带 key 参数），避免整段 URL 被误当 key。
+    以 http(s):// 开头的值按完整地址处理（必须自带 key 参数），并校验域名属于
+    企微官方，避免整段 URL 被误当 key 后把消息发到别处。
     """
     if value.startswith(("http://", "https://")):
+        host = urllib.parse.urlsplit(value).hostname or ""
+        if host not in ALLOWED_HOSTS:
+            raise WeComError(f"webhook 地址域名不是企微官方域名: {host or '未知'}")
         return value
-    return value if "key=" in value else f"{BASE_URL}?key={value}"
+    return value if "key=" in value else f"{BASE_URL}?key={urllib.parse.quote(value, safe='')}"
 
 
 def _append_signature(url: str, secret: str) -> str:
-    """在 webhook 地址上追加 timestamp + msg_signature 查询参数。"""
+    """在 webhook 地址上追加 timestamp + msg_signature 查询参数。
+
+    必须在每次请求前现算：企微会校验 timestamp 的新鲜度，复用旧值会被判过期。
+    """
     timestamp = str(int(time.time()))
-    separator = "&" if "?" in url else "?"
     signature = gen_signature(timestamp, secret)
+    separator = "&" if "?" in url else "?"
     return f"{url}{separator}timestamp={timestamp}&msg_signature={signature}"
 
 
-def _resolve_webhook_from_env(warn: bool = True) -> str:
+def _resolve_webhook_from_env() -> str:
     """从环境变量解析 webhook 地址；未配置时抛出明确错误（不再回退到内置 key）。
 
-    :param warn: 保留以兼容旧调用签名，当前不再用于降级告警。
-    :raises WeComError: 环境变量与内置常量均未提供可用的 key。
+    :raises WeComError: 环境变量未提供可用的 key。
     """
     env_url = os.environ.get(ENV_WEBHOOK)
     if env_url:
         return env_url
     env_key = os.environ.get(ENV_KEY) or os.environ.get(ENV_QYWX_KEY)
     if env_key:
-        return f"{BASE_URL}?key={env_key}"
+        return _as_webhook_url(env_key)
     raise WeComError(
         "未配置企业微信 webhook key，请任选一种方式配置：\n"
         f"  1) 环境变量 {ENV_KEY}=你的-key\n"
@@ -245,21 +342,21 @@ def _resolve_webhook_from_env(warn: bool = True) -> str:
 
 
 def resolve_webhook(webhook: Optional[str] = None, key: Optional[str] = None,
-                    secret: Optional[str] = None, warn: bool = True) -> str:
+                    secret: Optional[str] = None) -> str:
     """按统一优先级解析最终可用的 webhook 地址（必要时追加签名参数）。
 
     优先级：webhook > key > WECOM_WEBHOOK > WECOM_WEBHOOK_KEY > QYWX_KEY > 报错。
 
-    :param secret: 传了即在 URL 上追加签名校验参数。
-    :param warn:   回退到内置演示 key 时是否打印警告。
-    :raises WeComError: 解析结果中不含 key 参数。
+    :param secret: 传了即在 URL 上追加签名校验参数。注意此处算出的 timestamp 只有
+                   调用瞬间有效，长驻进程请改用 WeComBot（它每次请求前现算）。
+    :raises WeComError: 解析结果中不含 key 参数，或域名不是企微官方域名。
     """
     if webhook:
         url = _as_webhook_url(webhook)
     elif key:
         url = _as_webhook_url(key)
     else:
-        url = _resolve_webhook_from_env(warn)
+        url = _resolve_webhook_from_env()
 
     if extract_key(url) is None:
         raise WeComError(f"webhook 地址缺少 key 参数：{mask_url(url)}")
@@ -269,37 +366,48 @@ def resolve_webhook(webhook: Optional[str] = None, key: Optional[str] = None,
 # ===================================================================== #
 # HTTP 传输层（requests 优先，urllib 兜底）
 # ===================================================================== #
-def _parse_json_response(text: str) -> JsonDict:
+def _parse_json_response(text: str, status: Optional[int] = None) -> JsonDict:
     """解析接口响应；非 JSON / 非对象响应统一包装成失败结构。"""
     try:
         obj = json.loads(text)
     except ValueError:
-        return {"errcode": -1, "errmsg": f"非 JSON 响应: {text[:200]}"}
+        prefix = f"HTTP {status} " if status is not None else ""
+        return {"errcode": -1, "errmsg": f"{prefix}非 JSON 响应: {text[:200]}",
+                "_status": status}
     if not isinstance(obj, dict):
-        return {"errcode": -1, "errmsg": f"响应不是 JSON 对象: {text[:200]}"}
+        return {"errcode": -1, "errmsg": f"响应不是 JSON 对象: {text[:200]}",
+                "_status": status}
+    if status is not None:
+        obj.setdefault("_status", status)
     return obj
 
 
 def _http_post(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> JsonDict:
     """发送一次 POST 并返回解析后的响应。
 
-    requests 可用时优先使用（连接池更稳定），否则回退标准库 urllib；
+    requests 可用时复用线程内 Session（连接池），否则回退标准库 urllib；
     网络异常统一包装成 {errcode: -1, errmsg: ...}，不向上抛异常。
+    返回体里的 ``_status`` 是 HTTP 状态码，供上层区分 5xx 等可重试错误。
     """
-    try:
-        import requests  # type: ignore
-        response = requests.post(url, data=body, headers=headers, timeout=timeout)
-        text = response.text
-    except ImportError:
+    if _requests is not None:
         try:
-            request = urllib.request.Request(url, data=body, headers=headers)
-            with urllib.request.urlopen(request, timeout=timeout, context=_SSL_CTX) as resp:
-                text = resp.read().decode("utf-8", "replace")
+            response = _requests_session().post(
+                url, data=body, headers=headers, timeout=timeout)
+            return _parse_json_response(response.text, response.status_code)
         except Exception as exc:
             return {"errcode": -1, "errmsg": _describe_exception(exc)}
+
+    try:
+        request = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(request, timeout=timeout,
+                                    context=_ssl_context()) as resp:
+            return _parse_json_response(
+                resp.read().decode("utf-8", "replace"), getattr(resp, "status", None))
+    except urllib.error.HTTPError as exc:       # 4xx/5xx 也把响应体读出来解析
+        text = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        return _parse_json_response(text or str(exc), exc.code)
     except Exception as exc:
         return {"errcode": -1, "errmsg": _describe_exception(exc)}
-    return _parse_json_response(text)
 
 
 def _http_post_json(url: str, payload: Payload, timeout: float) -> JsonDict:
@@ -308,10 +416,17 @@ def _http_post_json(url: str, payload: Payload, timeout: float) -> JsonDict:
     return _http_post(url, body, {"Content-Type": "application/json"}, timeout)
 
 
+def _errmsg_with_help(errmsg: str, errcode: Optional[int]) -> str:
+    """给可查的 errcode 附上官方排查链接。"""
+    if isinstance(errcode, int) and errcode not in (0, -1):
+        return f"{errmsg}（排查：{HELP_URL.format(errcode=errcode)}）"
+    return errmsg
+
+
 # ===================================================================== #
 # 媒体预处理（图片 / 文件）
 # ===================================================================== #
-def _read_local_file(path: str, label: str = "") -> bytes:
+def _read_local_file(path: str, label: str = "本地") -> bytes:
     """读取本地二进制文件。
 
     :param label: 用途描述（如「图片」），仅用于错误提示。
@@ -331,21 +446,37 @@ def _base64_length(size: int) -> int:
     return (size + 2) // 3 * 4
 
 
+def _sniff_image_mime(raw: bytes) -> Optional[str]:
+    """按文件头魔数判定图片类型，不依赖扩展名与系统 MIME 注册表。"""
+    for magic, mime in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            return mime
+    return None
+
+
 def _load_image(path: str) -> Tuple[bytes, str]:
     """读取本地图片并校验类型（企微仅支持 JPEG/PNG）。
+
+    以文件头为准：扩展名是 .png 但内容是 webp 的文件会在本地就被拦下。
 
     :return: (原始字节, MIME 类型)
     :raises WeComError: 文件不存在或类型不受支持。
     """
     raw = _read_local_file(path, label="图片")
-    mime = mimetypes.guess_type(path)[0] or ""
-    if mime not in ALLOWED_IMAGE_MIMES:
-        raise WeComError(f"企微仅支持 JPEG/PNG 图片，当前文件类型: {mime or '未知'} ({path})")
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        guessed = mimetypes.guess_type(path)[0] or "未知"
+        raise WeComError(
+            f"企微仅支持 JPEG/PNG 图片，当前文件内容不是有效 JPEG/PNG"
+            f"（扩展名推断为 {guessed}）: {path}")
     return raw, mime
 
 
 def _compress_image(data: bytes, mime: str, max_bytes: int) -> bytes:
     """对超限图片逐级降质 / 缩放，直到 base64 后满足限制。需要 Pillow。
+
+    PNG 是无损格式，quality 对它无效，因此 PNG 超限时先转 JPEG 再降质；
+    JPEG 直接降质 + 缩放。
 
     :raises WeComError: 未安装 Pillow，或压缩到轮数上限仍超限。
     """
@@ -358,14 +489,19 @@ def _compress_image(data: bytes, mime: str, max_bytes: int) -> bytes:
         )
 
     image = Image.open(BytesIO(data))
+    if image.mode not in ("RGB", "L"):
+        image = image.convert("RGB")
     fmt = "JPEG" if mime == "image/jpeg" else "PNG"
     quality, ratio = 92, 0.9
-    for _ in range(MAX_COMPRESS_ROUNDS):
+    for round_index in range(MAX_COMPRESS_ROUNDS):
+        if fmt == "PNG" and round_index >= 2:
+            fmt = "JPEG"             # PNG 降不动了，转 JPEG 才有意义
+            quality = 92
         buffer = BytesIO()
         if fmt == "JPEG":
-            image.convert("RGB").save(buffer, format=fmt, quality=quality)
+            image.convert("RGB").save(buffer, format=fmt, quality=quality, optimize=True)
         else:
-            image.save(buffer, format=fmt)
+            image.save(buffer, format=fmt, optimize=True)
         data = buffer.getvalue()
         if _base64_length(len(data)) <= max_bytes:
             return data
@@ -408,9 +544,10 @@ def _build_multipart(field: str, filename: str, raw: bytes) -> Tuple[bytes, str]
     """
     boundary = "----wecom" + uuid.uuid4().hex
     crlf = "\r\n"
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     head = (f"--{boundary}{crlf}"
             f'Content-Disposition: form-data; name="{field}"; filename="{filename}"{crlf}'
-            f"Content-Type: application/octet-stream{crlf}{crlf}").encode("utf-8")
+            f"Content-Type: {content_type}{crlf}{crlf}").encode("utf-8")
     tail = f"{crlf}--{boundary}--{crlf}".encode("utf-8")
     return head + raw + tail, boundary
 
@@ -429,43 +566,81 @@ class WeComBot:
                  secret: Optional[str] = None, timeout: Optional[float] = None,
                  max_bytes: int = DEFAULT_MAX_BYTES,
                  image_max_bytes: int = DEFAULT_IMAGE_MAX_BYTES,
-                 default_msgtype: str = "markdown_v2"):
+                 default_msgtype: str = "markdown_v2",
+                 min_interval: float = 0.0):
         """
         :param key:             webhook key；与 webhook 二选一，缺省读环境变量。
         :param webhook:         完整 webhook 地址（含 ?key=），优先级高于 key。
         :param secret:          安全设置「加解密密钥」，传了即启用签名校验。
         :param timeout:         单次请求超时（秒），缺省读环境变量或 8.0。
-        :param max_bytes:       text/markdown 正文字节上限，超出自动截断。
+        :param max_bytes:       markdown 正文字节上限，超出自动截断。
         :param image_max_bytes: 图片 base64 上限（默认 2MB）。
         :param default_msgtype: send_markdown 未指定类型时的默认值。
+        :param min_interval:    两次发送之间的最小间隔秒数（0 表示不节流）。
+                                企微限频 20 条/分钟，批量推送建议 3.0。
+        :raises WeComError:     配置不合法（缺 key、超时非数字、域名不符等）。
         """
         if timeout is None:
-            timeout = float(os.environ.get(ENV_TIMEOUT, DEFAULT_TIMEOUT))
+            timeout = self._timeout_from_env()
         self.timeout = float(timeout)
         self.max_bytes = max_bytes
         self.image_max_bytes = image_max_bytes
-        self.secret = secret or os.environ.get(ENV_SECRET)
+        self.secret = secret or os.environ.get(ENV_SECRET) or None
         self.default_msgtype = default_msgtype if default_msgtype in self.SUPPORTED_TYPES \
             else "markdown_v2"
-        self.url = resolve_webhook(webhook=webhook, key=key, secret=self.secret)
+        self.min_interval = max(0.0, float(min_interval))
+        self._last_sent = 0.0
+        self._rate_lock = threading.Lock()
+        # URL 只存「不含签名」的版本，签名在每次请求前现算，避免 timestamp 过期
+        self._base_url = resolve_webhook(webhook=webhook, key=key)
+        self._key = extract_key(self._base_url)
+
+    @staticmethod
+    def _timeout_from_env() -> float:
+        """读取 WECOM_TIMEOUT，非法值转成明确的 WeComError。"""
+        raw = os.environ.get(ENV_TIMEOUT)
+        if raw is None or raw == "":
+            return DEFAULT_TIMEOUT
+        try:
+            return float(raw)
+        except ValueError:
+            raise WeComError(f"环境变量 {ENV_TIMEOUT} 不是合法数字: {raw!r}") from None
+
+    @property
+    def url(self) -> str:
+        """当前请求要用的完整地址（启用签名时每次调用都刷新 timestamp）。"""
+        if self.secret:
+            return _append_signature(self._base_url, self.secret)
+        return self._base_url
 
     @property
     def webhook_masked(self) -> str:
         """脱敏后的 webhook 地址，可直接打日志。"""
-        return mask_url(self.url)
+        return mask_url(self._base_url)
 
     def __repr__(self) -> str:
         return f"WeComBot(url={self.webhook_masked}, timeout={self.timeout})"
 
     # ── 内部工具 ────────────────────────────────────────────────────── #
-    def _truncate(self, content: str) -> str:
-        """按 UTF-8 字节安全截断，为「已截断」提示预留字节，保证最终不超限。"""
+    def _truncate(self, content: str, limit: Optional[int] = None) -> str:
+        """按 UTF-8 字节安全截断，超出时给出告警，保证最终不超限。
+
+        :param limit: 字节上限，缺省用 self.max_bytes。
+        """
+        limit = self.max_bytes if limit is None else limit
         raw = content.encode("utf-8")
-        if len(raw) <= self.max_bytes:
+        if len(raw) <= limit:
             return content
         note = "\n\n…（内容过长已截断）"
-        limit = max(0, self.max_bytes - len(note.encode("utf-8")))
-        return raw[:limit].decode("utf-8", "ignore") + note
+        budget = max(0, limit - len(note.encode("utf-8")))
+        head = raw[:budget].decode("utf-8", "ignore")
+        # 尽量在换行处收尾，别把 markdown 结构切一半
+        newline = head.rfind("\n")
+        if newline > budget // 2:
+            head = head[:newline]
+        _log_warn(f"内容 {len(raw)}B 超过 {limit}B 上限，已截断至 "
+                  f"{len(head.encode('utf-8'))}B")
+        return head + note
 
     @staticmethod
     def _guard(action: Callable[[], SendResult]) -> SendResult:
@@ -477,29 +652,52 @@ class WeComBot:
         except Exception as exc:
             return SendResult.failure(_describe_exception(exc))
 
+    def _throttle(self) -> None:
+        """按 min_interval 节流，避免撞上企微 20 条/分钟的限制。"""
+        if self.min_interval <= 0:
+            return
+        with self._rate_lock:
+            wait = self.min_interval - (time.monotonic() - self._last_sent)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_sent = time.monotonic()
+
     # ── 低层发送 ────────────────────────────────────────────────────── #
     def send(self, payload: Payload, dry_run: bool = False) -> SendResult:
         """发送任意合法 webhook payload，网络 / 接口错误收敛为 SendResult。
 
         :param payload: 符合企业微信机器人消息格式的请求体（想发 news 等未封装类型时用这个）。
         :param dry_run: True 时只打印请求体不真正发送（返回 ok=True）。
+        :raises WeComError: payload 不是对象或缺少 msgtype（仅此两种输入问题）。
         """
+        if not isinstance(payload, dict) or "msgtype" not in payload:
+            raise WeComError("payload 必须是包含 msgtype 的对象")
+
         if dry_run:
             _log_dry_run(payload)
             return SendResult.success("dry-run")
 
+        self._throttle()
         response = _http_post_json(self.url, payload, self.timeout)
+        status = response.pop("_status", None)
         errcode = response.get("errcode")
         if errcode == 0:
-            return SendResult.success()
-        return SendResult.failure(response.get("errmsg", f"未知错误: {response}"), errcode)
+            return SendResult.success(status=status)
+        errmsg = _errmsg_with_help(response.get("errmsg", f"未知错误: {response}"), errcode)
+        if errcode == RATE_LIMIT_ERRCODE:
+            errmsg = f"{errmsg}（已触发 20 条/分钟限频，请放慢节奏或设置 min_interval=3）"
+        return SendResult.failure(errmsg, errcode, status)
 
     # ── 高层便捷方法 ────────────────────────────────────────────────── #
     def send_text(self, content: str, mentioned_list: Optional[Sequence[str]] = None,
                   mentioned_mobile_list: Optional[Sequence[str]] = None,
                   dry_run: bool = False) -> SendResult:
-        """纯文本消息，可选 @成员（userid 列表）或 @手机号列表。正文超长自动截断。"""
-        text: JsonDict = {"content": self._truncate(content)}
+        """纯文本消息，可选 @成员（userid 列表）或 @手机号列表。
+
+        正文按企微 text 类型上限（2048B）截断，即使 max_bytes 被调大也不会超。
+        """
+        limit = min(self.max_bytes, TEXT_MAX_BYTES)
+        text: JsonDict = {"content": self._truncate(content, limit)}
         if mentioned_list:
             text["mentioned_list"] = list(mentioned_list)
         if mentioned_mobile_list:
@@ -515,6 +713,7 @@ class WeComBot:
         """
         resolved = msgtype or self.default_msgtype
         if resolved not in self.MARKDOWN_TYPES:
+            _log_warn(f"不支持的 markdown msgtype: {msgtype!r}，已回退 markdown_v2")
             resolved = "markdown_v2"
         return self.send({"msgtype": resolved,
                           resolved: {"content": self._truncate(content)}}, dry_run=dry_run)
@@ -526,24 +725,39 @@ class WeComBot:
                            dry_run: bool = False) -> SendResult:
         """结构化模板卡片。
 
-        :param items:       [(键, 值), ...]，最多展示 6 项。
+        :param items:       [(键, 值), ...]，最多展示 6 项，超出会被明确告警。
         :param source_desc: 卡片左上角来源小字。
         :param url:         点击跳转地址，缺省用官方兜底链接。
+        :raises WeComError: 标题为空、item 数量超限或 card_type 不支持。
         """
-        card: JsonDict = {
-            "card_type": card_type,
-            "main_title": {"title": title, "desc": desc},
-            "horizontal_content_list": [
-                {"keyname": str(k), "value": str(v)} for k, v in (items or [])[:MAX_CARD_ITEMS]
-            ],
-        }
-        if source_desc:
-            card["source"] = {"desc": source_desc, "desc_color": 0}
-        if url:
-            card["card_action"] = {"type": 1, "url": url}
-        elif card_type == "text_notice":
-            card["card_action"] = {"type": 1, "url": DEFAULT_CARD_URL}
-        return self.send({"msgtype": "template_card", "template_card": card}, dry_run=dry_run)
+        def _build() -> SendResult:
+            if not title.strip():
+                raise WeComError("模板卡片 title 不能为空")
+            if card_type != "text_notice":
+                raise WeComError(
+                    f"当前仅封装 text_notice 卡片，card_type={card_type!r} 需自行用 "
+                    "send(payload) 构造（button_interaction / news_notice 字段结构不同）")
+
+            pairs = list(items or [])
+            if len(pairs) > MAX_CARD_ITEMS:
+                raise WeComError(
+                    f"模板卡片最多 {MAX_CARD_ITEMS} 项，当前传入 {len(pairs)} 项；"
+                    "请精简后用 send(payload) 发多张卡片")
+            card: JsonDict = {
+                "card_type": card_type,
+                "main_title": {"title": title, "desc": desc},
+                "horizontal_content_list": [
+                    {"keyname": str(k), "value": "" if v is None else str(v)}
+                    for k, v in pairs
+                ],
+                "card_action": {"type": 1, "url": url or DEFAULT_CARD_URL},
+            }
+            if source_desc:
+                card["source"] = {"desc": source_desc, "desc_color": 0}
+            return self.send({"msgtype": "template_card", "template_card": card},
+                             dry_run=dry_run)
+
+        return self._guard(_build)
 
     def send_image(self, path: Optional[str] = None, base64_data: Optional[str] = None,
                    md5: Optional[str] = None, allow_compress: bool = True,
@@ -552,11 +766,16 @@ class WeComBot:
 
         二选一：给本地 path（自动校验类型 / 压缩 / base64 / md5），或给已算好的
         (base64_data, md5)。任何输入问题都以失败 SendResult 返回，不抛异常。
+        dry_run 时只校验文件与类型，不做压缩（大图 dry-run 也不会卡住）。
         """
         def _build() -> SendResult:
             encoded, digest = base64_data, md5
             if path and not encoded:
-                encoded, digest = prepare_image(path, self.image_max_bytes, allow_compress)
+                if dry_run:
+                    _load_image(path)       # 只做类型校验，跳过压缩与编码
+                    encoded, digest = "<dry-run-base64>", "<dry-run-md5>"
+                else:
+                    encoded, digest = prepare_image(path, self.image_max_bytes, allow_compress)
             if not encoded or not digest:
                 raise WeComError("send_image 需提供 path，或同时提供 (base64_data, md5)")
             _ensure_base64_size(encoded, self.image_max_bytes)
@@ -586,17 +805,18 @@ class WeComBot:
 
     @staticmethod
     def _read_file_checked(local_path: str) -> bytes:
-        """读取本地文件并校验体积（5B~20MB）。
+        """读取本地文件并校验体积（5B~20MB）。先按 stat 判体积，避免整块读进内存。
 
         :raises WeComError: 文件不存在或体积超出企微群文件限制。
         """
-        raw = _read_local_file(local_path)
-        size = len(raw)
+        if not os.path.isfile(local_path):
+            raise WeComError(f"本地文件不存在: {local_path}")
+        size = os.path.getsize(local_path)
         if size > MAX_FILE_BYTES:
             raise WeComError(f"文件 {local_path} 大小 {size}B 超过企微 20MB 上限")
         if size < MIN_FILE_BYTES:
             raise WeComError(f"文件 {local_path} 大小 {size}B 低于企微 5B 下限")
-        return raw
+        return _read_local_file(local_path)
 
     def _upload_media(self, local_path: str, filename: Optional[str] = None) -> str:
         """上传本地文件到企微服务器并返回 media_id。
@@ -604,14 +824,14 @@ class WeComBot:
         :raises WeComError: 地址缺 key、上传失败或响应缺少 media_id。
         """
         raw = self._read_file_checked(local_path)
-        key = extract_key(self.url)
-        if not key:
+        if not self._key:
             raise WeComError(f"无法从 webhook 地址中抽取 key: {self.webhook_masked}")
 
         body, boundary = _build_multipart(
             "media", filename or os.path.basename(local_path), raw)
+        self._throttle()
         response = _http_post(
-            f"{UPLOAD_URL}?key={key}&type=file", body,
+            f"{UPLOAD_URL}?key={urllib.parse.quote(self._key, safe='')}&type=file", body,
             {"Content-Type": f"multipart/form-data; boundary={boundary}",
              "Content-Length": str(len(body))},
             self.timeout,
@@ -629,9 +849,10 @@ class WeComBot:
 # 模块级便捷函数（返回 (ok, err) 元组，成功时 err 为空串）
 # ===================================================================== #
 def _new_bot(key: Optional[str], webhook: Optional[str], secret: Optional[str],
-             timeout: Optional[float]) -> WeComBot:
+             timeout: Optional[float], min_interval: float = 0.0) -> WeComBot:
     """按公共入参构造一个临时客户端。"""
-    return WeComBot(key=key, webhook=webhook, secret=secret, timeout=timeout)
+    return WeComBot(key=key, webhook=webhook, secret=secret, timeout=timeout,
+                    min_interval=min_interval)
 
 
 def _as_tuple(result: SendResult) -> Tuple[bool, str]:
@@ -711,6 +932,12 @@ def _load_content(value: str) -> str:
     return value
 
 
+def _summarize(content: str, width: int = 20) -> str:
+    """把内容压成一行摘要，供 CLI 结果行展示（换行、空白折成空格）。"""
+    flat = " ".join(content.split())
+    return flat[:width] or "<空内容>"
+
+
 def _parse_key_values(pairs: Optional[Sequence[str]]) -> List[Tuple[str, str]]:
     """把 --item k=v 序列解析成卡片项列表；无 '=' 时值取空串。"""
     items: List[Tuple[str, str]] = []
@@ -728,9 +955,11 @@ def _build_parser() -> argparse.ArgumentParser:
     common.add_argument("--secret", help="安全设置「加解密密钥」，传了即启用签名校验")
     common.add_argument("--timeout", type=float, default=None, help="请求超时秒数")
     common.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES,
-                        help=f"文本 content 字节上限（默认 {DEFAULT_MAX_BYTES}）")
+                        help=f"markdown content 字节上限（默认 {DEFAULT_MAX_BYTES}）")
     common.add_argument("--image-max-bytes", type=int, default=DEFAULT_IMAGE_MAX_BYTES,
                         help="图片 base64 上限（默认 2MB）")
+    common.add_argument("--rate", type=float, default=0.0, metavar="SEC",
+                        help="两次发送的最小间隔秒数（批量推送建议 3，对应 20 条/分钟）")
     common.add_argument("--dry-run", action="store_true", help="只打印请求体，不真正发送")
     common.add_argument("-v", "--verbose", action="store_true", help="打印目标 webhook（脱敏）")
 
@@ -743,7 +972,7 @@ def _build_parser() -> argparse.ArgumentParser:
                "  wecom_notifier markdown - < report.md\n"
                "  wecom_notifier markdown @report.md\n"
                "  wecom_notifier card '任务完成' --item 样本=155 --item 耗时=0.7s\n"
-               "  wecom_notifier image a.png b.jpg --key xxx\n"
+               "  wecom_notifier image a.png b.jpg --rate 3\n"
                "  wecom_notifier file ./report.html\n")
     parser.add_argument("--version", action="version",
                         version=f"wecom_notifier {__version__}")
@@ -783,12 +1012,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_command(args: argparse.Namespace, bot: WeComBot) -> List[Tuple[str, SendResult]]:
     """按子命令分发执行，返回 [(任务名, 结果), ...]；image 子命令支持多图批量。"""
     if args.cmd == "text":
-        return [(args.content[:20], bot.send_text(
-            _load_content(args.content), args.mention, args.mention_mobile, args.dry_run))]
+        content = _load_content(args.content)
+        return [(_summarize(content), bot.send_text(
+            content, args.mention, args.mention_mobile, args.dry_run))]
     if args.cmd == "markdown":
+        content = _load_content(args.content)
         msgtype = "markdown" if args.v1 else "markdown_v2"
-        return [("markdown", bot.send_markdown(
-            _load_content(args.content), msgtype, args.dry_run))]
+        return [(_summarize(content), bot.send_markdown(content, msgtype, args.dry_run))]
     if args.cmd == "card":
         return [(args.title, bot.send_template_card(
             args.title, args.desc, _parse_key_values(args.item), args.source_desc, args.url,
@@ -811,7 +1041,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         bot = WeComBot(key=args.key, webhook=args.webhook, secret=args.secret,
                        timeout=args.timeout, max_bytes=args.max_bytes,
-                       image_max_bytes=args.image_max_bytes)
+                       image_max_bytes=args.image_max_bytes,
+                       min_interval=args.rate)
     except WeComError as exc:
         _log_error(f"配置错误: {exc}")
         return 2
