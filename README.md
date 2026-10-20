@@ -7,6 +7,29 @@
 - 依赖：**零强制依赖**，Python 3.8+ 标准库即可运行；`requests`、`Pillow` 为可选增强
 - 适用：告警通知、日报播报、运维提醒、报表与图片分发、青龙面板定时任务
 
+<img src="docs/hero.svg" alt="三种用法：命令行 / Python API / 定时任务" width="880">
+
+```bash
+python wecom_notifier.py text "Hello 企业微信"
+```
+
+---
+
+## 目录
+
+| 章节 | 解决什么问题 |
+| --- | --- |
+| [1. 30 秒上手](#1-30-秒上手) | 拿到 key，发出第一条消息 |
+| [2. key 从哪来](#2-key-从哪来) | 五种配置方式与优先级、域名白名单 |
+| [3. 命令行速查](#3-命令行速查) | 五类消息的具体参数 |
+| [4. Python 调用](#4-python-调用) | 嵌进你自己的脚本 |
+| [5. 消息类型与限制](#5-消息类型与限制) | 体积上限、限频、v2.2.0 → v2.3.0 行为变化 |
+| [6. 签名校验](#6-签名校验可选) | 机器人开了「签名校验」怎么办 |
+| [7. 青龙面板部署](#7-青龙面板部署) | 定时任务零配置 |
+| [8. 退出码](#8-退出码) | 调度平台如何判断成败 |
+| [9. 常见问题排查](#9-常见问题排查) | 报错对照表 |
+| [10. 可选依赖](#10-可选依赖) / [11. 安全建议](#11-安全建议) | 收尾两件事 |
+
 ---
 
 ## 1. 30 秒上手
@@ -40,9 +63,11 @@ $env:PYTHONIOENCODING="utf-8"; chcp 65001
 
 ---
 
-## 2. 配置 key 的方式与优先级
+## 2. key 从哪来
 
-解析顺序（前面命中即止）：
+环境变量、命令行参数、青龙面板注入 —— 五种来源按顺序命中即止：
+
+<img src="docs/key-resolution.svg" alt="key 解析优先级：--webhook → --key → WECOM_WEBHOOK → WECOM_WEBHOOK_KEY → QYWX_KEY" width="880">
 
 | 顺序 | 来源 | 说明 |
 | --- | --- | --- |
@@ -51,7 +76,7 @@ $env:PYTHONIOENCODING="utf-8"; chcp 65001
 | 3 | `WECOM_WEBHOOK` | 完整地址 |
 | 4 | `WECOM_WEBHOOK_KEY` | 只放 key（最常用） |
 | 5 | `QYWX_KEY` | **青龙面板**通知设置自动生成；与第 4 项同级，`WECOM_WEBHOOK_KEY` 存在时优先用它 |
-| — | 以上均未配置 | 直接报错退出（退出码 2），并打印配置指引；**没有内置 key** |
+| — | 以上均未配置 | 打印配置指引，退出码 2；**没有内置 key** |
 
 其它环境变量：
 
@@ -144,7 +169,7 @@ python wecom_notifier.py file ./data.xlsx --name "2026-09-05 数据.xlsx"
 ```
 
 群成员点开用企微内置浏览器预览；media_id 3 天内有效，且只能由上传它的机器人使用。
-体积在读取前用 `stat` 判定，不会为了判断大小先把 20MB 读进内存。
+体积在读取前用文件属性判定，不会为了判断大小先把 20MB 读进内存。
 
 ### 3.6 内容参数的三种写法
 
@@ -208,7 +233,11 @@ if not ok:
     print("推送失败:", err)
 ```
 
-### 4.3 返回值
+### 4.3 返回值与重试
+
+一次发送会经过四个阶段，失败一律收敛成返回值，不会把异常抛给调用方：
+
+<img src="docs/send-pipeline.svg" alt="发送链路：解析 key → 构造 payload → 节流与签名 → 发送与错误收敛" width="880">
 
 - 类方法 → `SendResult(ok, errcode, errmsg, status)`，支持 `if result:` 判断
 - 模块级函数 → `(ok, err)` 元组，成功时 `err` 为空串
@@ -218,6 +247,7 @@ if not ok:
 
 ```python
 import time
+
 for attempt in range(3):
     result = bot.send_text("巡检完成")
     if result or not result.retryable:
@@ -228,6 +258,8 @@ for attempt in range(3):
 ---
 
 ## 5. 消息类型与限制
+
+<img src="docs/message-types.svg" alt="五类消息与各自上限" width="880">
 
 | 类型 | 体积上限 | 格式要求 | 备注 |
 | --- | --- | --- | --- |
@@ -240,7 +272,7 @@ for attempt in range(3):
 **限频**：每个机器人 **20 条/分钟**。v2.3.0 起可用 `--rate 3` 或 `min_interval=3.0` 自动节流；
 超限返回 `errcode=45009`，错误信息会明确提示「已触发限频」，且 `retryable=True`。
 
-### 已知行为（v2.3.0 修复项）
+### 从 v2.2.0 升级
 
 | 项 | v2.2.0 行为 | v2.3.0 行为 |
 | --- | --- | --- |
@@ -252,6 +284,8 @@ for attempt in range(3):
 | PNG 大图压缩 | 只缩放不降质，容易压不下去 | 降不动时转 JPEG 重试 |
 | `WECOM_TIMEOUT` 非法 | 裸抛 ValueError + traceback | 转成「配置错误」退出码 2 |
 | Windows GBK 控制台 | emoji 触发 UnicodeEncodeError 崩溃 | 自动降级为纯文本输出 |
+
+完整改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -348,3 +382,8 @@ python wecom_notifier.py text "测试" --timeout 20    # ③ 网络慢时延长�
   **图片 base64 已替换成体积占位符**，可以放心贴群排查。
 - 机器人限频 20 条/分钟，批量任务务必限速。
 - webhook 域名做了白名单校验，只有 `qyapi.weixin.qq.com` 会被接受。
+
+---
+
+<sub>配图为 `docs/*.svg`，用 `pwsh docs/build_diagrams.ps1` 重新生成；矢量图在 GitHub 上随深浅色主题自动切换。</sub>
+

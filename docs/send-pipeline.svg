@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="320" viewBox="0 0 880 320" role="img" aria-label="一次推送的完整链路">
+<defs>
+  <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#2b7fff"/>
+    <stop offset="100%" stop-color="#07c160"/>
+  </linearGradient>
+  <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#07c160"/>
+    <stop offset="100%" stop-color="#2b7fff"/>
+  </linearGradient>
+</defs>
+<style>
+  :root { --bg:#f6f8fa; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --card:#ffffff; --code:#eff2f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#30363d; --card:#161b22; --code:#1c2128; }
+  }
+  text { fill: var(--fg); }
+  .m { fill: var(--muted); }
+  .cd { fill: var(--card); stroke: var(--line); stroke-width:1; }
+  .ln { stroke: var(--line); stroke-width:1; }
+  .ac { stroke: url(#g2); stroke-width:2; fill:none; }
+</style>  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='24' y='32' font-size='17' font-weight='700'>一次发送发生了什么</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='856' y='32' font-size='12' class='m' text-anchor='end'>网络失败不让进程崩掉</text>
+
+  <rect class='cd' x='24' y='60' width='600' height='50' rx='8' fill='var(--card)'/>
+  <circle cx='52' cy='85' r='13' fill='url(#g1)'/>
+  <text x='52' y='90' font-size='13' font-weight='700' fill='#ffffff' text-anchor='middle'>1</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='82' font-size='14' font-weight='600'>解析 key</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='100' font-size='12' class='m'>参数 → 环境变量 → 域名白名单校验</text>
+  <rect class='cd' x='24' y='122' width='600' height='50' rx='8' fill='var(--card)'/>
+  <circle cx='52' cy='147' r='13' fill='url(#g1)'/>
+  <text x='52' y='152' font-size='13' font-weight='700' fill='#ffffff' text-anchor='middle'>2</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='144' font-size='14' font-weight='600'>构造 payload</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='162' font-size='12' class='m'>截断 / 校验 / 魔数判定，非法直接抛 WeComError</text>
+  <rect class='cd' x='24' y='184' width='600' height='50' rx='8' fill='var(--card)'/>
+  <circle cx='52' cy='209' r='13' fill='url(#g1)'/>
+  <text x='52' y='214' font-size='13' font-weight='700' fill='#ffffff' text-anchor='middle'>3</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='206' font-size='14' font-weight='600'>节流 + 签名</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='224' font-size='12' class='m'>min_interval 等待，每次请求前现算 timestamp</text>
+  <rect class='cd' x='24' y='246' width='600' height='50' rx='8' fill='var(--card)'/>
+  <circle cx='52' cy='271' r='13' fill='url(#g1)'/>
+  <text x='52' y='276' font-size='13' font-weight='700' fill='#ffffff' text-anchor='middle'>4</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='268' font-size='14' font-weight='600'>发送 + 收敛</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='78' y='286' font-size='12' class='m'>网络异常与 5xx 不抛异常，统一为 SendResult</text>
+  <path class='ac' d='M324 110 v12'/>
+  <path d='M320 118 l4 7 4 -7 z' fill='#07c160'/>
+  <path class='ac' d='M324 172 v12'/>
+  <path d='M320 180 l4 7 4 -7 z' fill='#07c160'/>
+  <path class='ac' d='M324 234 v12'/>
+  <path d='M320 242 l4 7 4 -7 z' fill='#07c160'/>
+  <path class='ac' d='M629 271 h21'/>
+  <path d='M645 267 l7 4 -7 4 z' fill='#07c160'/>
+
+  <rect x='656' y='122' width='200' height='114' rx='10' fill='none' stroke='var(--line)' stroke-dasharray='5 4'/>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='756' y='148' font-size='12.5' font-weight='600' text-anchor='middle'>失败也不崩</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='756' y='170' font-size='11.5' class='m' text-anchor='middle'>errcode / status</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='756' y='188' font-size='11.5' class='m' text-anchor='middle'>retryable</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='756' y='206' font-size='11.5' class='m' text-anchor='middle'>官方排查链接</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='756' y='224' font-size='11.5' class='m' text-anchor='middle'>退出码</text>
+
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='24' y='312' font-size='11.5' class='m'>只有输入不合法（文件缺失 / 格式不支持 / 超过上限 / payload 缺 msgtype）才抛 WeComError</text>
+</svg>

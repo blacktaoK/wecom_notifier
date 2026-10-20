@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="308" viewBox="0 0 880 308" role="img" aria-label="wecom_notifier 支持的 5 类消息">
+<defs>
+  <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#2b7fff"/>
+    <stop offset="100%" stop-color="#07c160"/>
+  </linearGradient>
+  <linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#07c160"/>
+    <stop offset="100%" stop-color="#2b7fff"/>
+  </linearGradient>
+</defs>
+<style>
+  :root { --bg:#f6f8fa; --fg:#1f2328; --muted:#656d76; --line:#d0d7de; --card:#ffffff; --code:#eff2f5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0d1117; --fg:#e6edf3; --muted:#9198a1; --line:#30363d; --card:#161b22; --code:#1c2128; }
+  }
+  text { fill: var(--fg); }
+  .m { fill: var(--muted); }
+  .cd { fill: var(--card); stroke: var(--line); stroke-width:1; }
+  .ln { stroke: var(--line); stroke-width:1; }
+  .ac { stroke: url(#g2); stroke-width:2; fill:none; }
+</style>  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='24' y='32' font-size='17' font-weight='700'>一个文件，五类消息</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='836' y='32' font-size='12' class='m' text-anchor='end'>上限取自企业微信官方接口</text>
+  <line class='ln' x1='24' y1='44' x2='836' y2='44'/>
+  <rect class='cd' x='24' y='64' width='200' height='40' rx='8' fill='var(--card)'/>
+  <rect x='24' y='64' width='4' height='40' rx='2' fill='#2b7fff'/>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='89' font-size='14' font-weight='600'>text</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='89' font-size='14' class='m'>纯文本 · 可 @人</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='89' font-size='13' class='m' text-anchor='end'>≤ 2048 字节</text>
+  <rect class='cd' x='24' y='112' width='200' height='40' rx='8' fill='var(--card)'/>
+  <rect x='24' y='112' width='4' height='40' rx='2' fill='#07c160'/>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='137' font-size='14' font-weight='600'>markdown_v2</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='137' font-size='14' class='m'>标题 / 列表 / 表格 / 引用</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='137' font-size='13' class='m' text-anchor='end'>≤ 4096 字节</text>
+  <rect class='cd' x='24' y='160' width='200' height='40' rx='8' fill='var(--card)'/>
+  <rect x='24' y='160' width='4' height='40' rx='2' fill='#8b5cf6'/>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='185' font-size='14' font-weight='600'>template_card</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='185' font-size='14' class='m'>结构化 key-value 卡片</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='185' font-size='13' class='m' text-anchor='end'>≤ 6 项</text>
+  <rect class='cd' x='24' y='208' width='200' height='40' rx='8' fill='var(--card)'/>
+  <rect x='24' y='208' width='4' height='40' rx='2' fill='#f59e0b'/>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='233' font-size='14' font-weight='600'>image</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='233' font-size='14' class='m'>JPEG / PNG · 按魔数判定</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='233' font-size='13' class='m' text-anchor='end'>base64 ≤ 2MB</text>
+  <rect class='cd' x='24' y='256' width='200' height='40' rx='8' fill='var(--card)'/>
+  <rect x='24' y='256' width='4' height='40' rx='2' fill='#ef4444'/>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='281' font-size='14' font-weight='600'>file</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='281' font-size='14' class='m'>群文件 · 内置浏览器预览</text>
+  <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='281' font-size='13' class='m' text-anchor='end'>5B ~ 20MB</text>
+
+</svg>
