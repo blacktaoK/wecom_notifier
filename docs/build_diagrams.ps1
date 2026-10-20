@@ -65,7 +65,7 @@ $rows = @(
   @{ y=112; t="markdown_v2";   d="标题 / 列表 / 表格 / 引用";    l="≤ 4096 字节";      c="#07c160" },
   @{ y=160; t="template_card"; d="结构化 key-value 卡片";       l="≤ 6 项";           c="#8b5cf6" },
   @{ y=208; t="image";         d="JPEG / PNG · 按魔数判定";      l="base64 ≤ 2MB";     c="#f59e0b" },
-  @{ y=256; t="file";          d="群文件 · 内置浏览器预览";      l="5B ~ 20MB";        c="#ef4444" }
+  @{ y=256; t="file";          d="群文件 · 点击下载，非内联预览"; l="5B ~ 20MB";        c="#ef4444" }
 )
 $b = ""
 foreach ($r in $rows) {

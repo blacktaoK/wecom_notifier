@@ -45,7 +45,7 @@
   <rect class='cd' x='24' y='256' width='200' height='40' rx='8' fill='var(--card)'/>
   <rect x='24' y='256' width='4' height='40' rx='2' fill='#ef4444'/>
   <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='40' y='281' font-size='14' font-weight='600'>file</text>
-  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='281' font-size='14' class='m'>群文件 · 内置浏览器预览</text>
+  <text font-family='-apple-system, BlinkMacSystemFont, Segoe UI, PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif' x='248' y='281' font-size='14' class='m'>群文件 · 点击下载，非内联预览</text>
   <text font-family='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' x='836' y='281' font-size='13' class='m' text-anchor='end'>5B ~ 20MB</text>
 
 </svg>
