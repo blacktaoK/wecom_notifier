@@ -327,9 +327,10 @@ def _resolve_webhook_from_env() -> str:
     :raises WeComError: 环境变量未提供可用的 key。
     """
     env_url = os.environ.get(ENV_WEBHOOK)
-    if env_url:
-        return env_url
-    env_key = os.environ.get(ENV_KEY) or os.environ.get(ENV_QYWX_KEY)
+    if env_url and env_url.strip():
+        return env_url.strip()
+    env_key = (os.environ.get(ENV_KEY) or "").strip() \
+        or (os.environ.get(ENV_QYWX_KEY) or "").strip()
     if env_key:
         return _as_webhook_url(env_key)
     raise WeComError(
@@ -351,10 +352,10 @@ def resolve_webhook(webhook: Optional[str] = None, key: Optional[str] = None,
                    调用瞬间有效，长驻进程请改用 WeComBot（它每次请求前现算）。
     :raises WeComError: 解析结果中不含 key 参数，或域名不是企微官方域名。
     """
-    if webhook:
-        url = _as_webhook_url(webhook)
-    elif key:
-        url = _as_webhook_url(key)
+    if webhook and webhook.strip():
+        url = _as_webhook_url(webhook.strip())
+    elif key and key.strip():
+        url = _as_webhook_url(key.strip())
     else:
         url = _resolve_webhook_from_env()
 
@@ -552,6 +553,41 @@ def _build_multipart(field: str, filename: str, raw: bytes) -> Tuple[bytes, str]
     return head + raw + tail, boundary
 
 
+def _validate_payload(payload: Payload) -> None:
+    """按 msgtype 校验本地可控的硬限制，不合法直接抛 WeComError。
+
+    这些限制在企微服务端同样会被拒绝（40058），本地先拦是为了让错误更早、
+    更清楚，并且不浪费一次限频额度。只校验「无论服务端怎么变都确定非法」
+    的条件，不做保守猜测。
+    """
+    msgtype = payload.get("msgtype")
+    if msgtype not in WeComBot.SUPPORTED_TYPES:
+        raise WeComError(
+            f"不支持的 msgtype: {msgtype!r}；可用值：{', '.join(WeComBot.SUPPORTED_TYPES)}")
+
+    if msgtype == "template_card":
+        card = payload.get("template_card")
+        if not isinstance(card, dict):
+            raise WeComError("template_card 消息缺少 template_card 对象")
+        if card.get("card_type") != "text_notice":
+            raise WeComError(
+                f"当前仅封装 text_notice 卡片，card_type={card.get('card_type')!r} 需自行用 "
+                "send(payload) 构造（button_interaction / news_notice 字段结构不同）")
+        title = (card.get("main_title") or {}).get("title")
+        if not str(title or "").strip():
+            raise WeComError("模板卡片 title 不能为空")
+        rows = card.get("horizontal_content_list") or []
+        if len(rows) > MAX_CARD_ITEMS:
+            raise WeComError(
+                f"模板卡片最多 {MAX_CARD_ITEMS} 项，当前传入 {len(rows)} 项；"
+                "请精简后用 send(payload) 发多张卡片")
+
+    elif msgtype == "image":
+        image = payload.get("image") or {}
+        if not image.get("base64") or not image.get("md5"):
+            raise WeComError("image 消息需同时提供 base64 与 md5")
+
+
 # ===================================================================== #
 # 客户端主类
 # ===================================================================== #
@@ -668,25 +704,32 @@ class WeComBot:
 
         :param payload: 符合企业微信机器人消息格式的请求体（想发 news 等未封装类型时用这个）。
         :param dry_run: True 时只打印请求体不真正发送（返回 ok=True）。
-        :raises WeComError: payload 不是对象或缺少 msgtype（仅此两种输入问题）。
+        :raises WeComError: payload 不是对象、缺少 msgtype，或本地校验未通过
+                            （见 send_template_card / send_image / send_file 的输入限制）。
         """
-        if not isinstance(payload, dict) or "msgtype" not in payload:
-            raise WeComError("payload 必须是包含 msgtype 的对象")
+        def _run() -> SendResult:
+            # 输入校验放在 _guard 内：非法输入同样收敛为失败返回值，不向调用方抛异常
+            if not isinstance(payload, dict) or "msgtype" not in payload:
+                raise WeComError("payload 必须是包含 msgtype 的对象")
+            _validate_payload(payload)
 
-        if dry_run:
-            _log_dry_run(payload)
-            return SendResult.success("dry-run")
+            if dry_run:
+                _log_dry_run(payload)
+                return SendResult.success("dry-run")
 
-        self._throttle()
-        response = _http_post_json(self.url, payload, self.timeout)
-        status = response.pop("_status", None)
-        errcode = response.get("errcode")
-        if errcode == 0:
-            return SendResult.success(status=status)
-        errmsg = _errmsg_with_help(response.get("errmsg", f"未知错误: {response}"), errcode)
-        if errcode == RATE_LIMIT_ERRCODE:
-            errmsg = f"{errmsg}（已触发 20 条/分钟限频，请放慢节奏或设置 min_interval=3）"
-        return SendResult.failure(errmsg, errcode, status)
+            self._throttle()
+            response = _http_post_json(self.url, payload, self.timeout)
+            status = response.pop("_status", None)
+            errcode = response.get("errcode")
+            if errcode == 0:
+                return SendResult.success(status=status)
+            errmsg = _errmsg_with_help(
+                response.get("errmsg", f"未知错误: {response}"), errcode)
+            if errcode == RATE_LIMIT_ERRCODE:
+                errmsg = f"{errmsg}（已触发 20 条/分钟限频，请放慢节奏或设置 min_interval=3）"
+            return SendResult.failure(errmsg, errcode, status)
+
+        return self._guard(_run)
 
     # ── 高层便捷方法 ────────────────────────────────────────────────── #
     def send_text(self, content: str, mentioned_list: Optional[Sequence[str]] = None,
@@ -728,36 +771,24 @@ class WeComBot:
         :param items:       [(键, 值), ...]，最多展示 6 项，超出会被明确告警。
         :param source_desc: 卡片左上角来源小字。
         :param url:         点击跳转地址，缺省用官方兜底链接。
-        :raises WeComError: 标题为空、item 数量超限或 card_type 不支持。
+
+        输入不合法（标题为空 / 项数超过 6 / card_type 不支持）时返回失败 SendResult，
+        由 send() 统一收敛，不向调用方抛异常。
         """
-        def _build() -> SendResult:
-            if not title.strip():
-                raise WeComError("模板卡片 title 不能为空")
-            if card_type != "text_notice":
-                raise WeComError(
-                    f"当前仅封装 text_notice 卡片，card_type={card_type!r} 需自行用 "
-                    "send(payload) 构造（button_interaction / news_notice 字段结构不同）")
-
-            pairs = list(items or [])
-            if len(pairs) > MAX_CARD_ITEMS:
-                raise WeComError(
-                    f"模板卡片最多 {MAX_CARD_ITEMS} 项，当前传入 {len(pairs)} 项；"
-                    "请精简后用 send(payload) 发多张卡片")
-            card: JsonDict = {
-                "card_type": card_type,
-                "main_title": {"title": title, "desc": desc},
-                "horizontal_content_list": [
-                    {"keyname": str(k), "value": "" if v is None else str(v)}
-                    for k, v in pairs
-                ],
-                "card_action": {"type": 1, "url": url or DEFAULT_CARD_URL},
-            }
-            if source_desc:
-                card["source"] = {"desc": source_desc, "desc_color": 0}
-            return self.send({"msgtype": "template_card", "template_card": card},
-                             dry_run=dry_run)
-
-        return self._guard(_build)
+        pairs = list(items or [])
+        card: JsonDict = {
+            "card_type": card_type,
+            "main_title": {"title": title, "desc": desc},
+            "horizontal_content_list": [
+                {"keyname": str(k), "value": "" if v is None else str(v)}
+                for k, v in pairs
+            ],
+            "card_action": {"type": 1, "url": url or DEFAULT_CARD_URL},
+        }
+        if source_desc:
+            card["source"] = {"desc": source_desc, "desc_color": 0}
+        return self.send({"msgtype": "template_card", "template_card": card},
+                         dry_run=dry_run)
 
     def send_image(self, path: Optional[str] = None, base64_data: Optional[str] = None,
                    md5: Optional[str] = None, allow_compress: bool = True,

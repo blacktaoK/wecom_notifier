@@ -105,7 +105,7 @@ python wecom_notifier.py <子命令> [内容/路径] [公共参数]
 | `--timeout` | 请求超时秒数 |
 | `--max-bytes` | markdown 正文字节上限，超出截断（默认 4096） |
 | `--image-max-bytes` | 图片 base64 上限（默认 2MB） |
-| `--rate SEC` | 两次发送的最小间隔秒数；批量推送建议 `3`（对应 20 条/分钟） |
+| `--rate SEC` | 两次发送的最小间隔秒数；批量推送建议 `4`（滚动窗口 20 条/分钟，留 30% 余量） |
 | `--dry-run` | 只打印请求体，不真正发送 |
 | `-v, --verbose` | 打印目标 webhook（脱敏） |
 | `--version` | 打印版本号 |
@@ -241,7 +241,7 @@ if not ok:
 
 - 类方法 → `SendResult(ok, errcode, errmsg, status)`，支持 `if result:` 判断
 - 模块级函数 → `(ok, err)` 元组，成功时 `err` 为空串
-- 网络/接口错误**不抛异常**，一律收敛为失败返回值；只有输入不合法（文件不存在、格式不支持、超限、payload 缺 msgtype）才抛 `WeComError`
+- **任何错误都不抛异常**：网络异常、接口错误、输入不合法（文件不存在、格式不支持、超限、卡片项数超 6、payload 缺 msgtype）一律返回失败 `SendResult`。`WeComError` 只在**构造 `WeComBot`** 时抛出（key 缺失、域名不符、超时非数字）
 - `SendResult.retryable`：`True` 表示值得重试（网络异常 / 45009 限频 / HTTP 5xx）
 - `SendResult.status`：HTTP 状态码，有响应时才有值
 
@@ -269,8 +269,13 @@ for attempt in range(3):
 | image | base64 后 ≤ 2MB | **仅 JPEG / PNG**（按魔数判定） | 超限自动压缩（需 Pillow） |
 | file | 5B ~ 20MB | 任意 | 走 upload_media，HTML 可被企微内置浏览器渲染 |
 
-**限频**：每个机器人 **20 条/分钟**。v2.3.0 起可用 `--rate 3` 或 `min_interval=3.0` 自动节流；
-超限返回 `errcode=45009`，错误信息会明确提示「已触发限频」，且 `retryable=True`。
+**限频**：每个机器人 **滚动 60 秒窗口内最多 20 条**。v2.3.0 起可用 `--rate 4` 或 `min_interval=4.0`
+自动节流（实测连发 5 条零失败）；超限返回 `errcode=45009`，
+错误信息会明确提示「已触发限频」，且 `retryable=True`。
+
+> ⚠️ 额度是**共享的滚动窗口**，不是「每分钟清零一次」。实测未节流连发 22 条时，
+> 第 1–13 条成功、第 14–22 条全部 45009 —— 因为前一轮测试已经消耗了窗口内的额度。
+> 所以不要按「每 60 秒发 20 条」卡点，**留 30% 余量**，用 `--rate 4` 更稳。
 
 ### 从 v2.2.0 升级
 
@@ -344,7 +349,7 @@ python3 /ql/data/scripts/wecom_notifier.py image /ql/data/repo/chart.png --rate 
 | 现象 / errcode | 原因 | 处理 |
 | --- | --- | --- |
 | `93000 invalid webhook url` | key 填错、失效，或机器人已被移除 | 核对群机器人 Webhook 地址里的 key |
-| `45009 api freq out of limit` | 超过 20 条/分钟 | 加 `--rate 3` 或 `min_interval=3.0` |
+| `45009 api freq out of limit` | 滚动 60 秒窗口内超过 20 条 | 加 `--rate 4` 或 `min_interval=4.0`；额度会跨进程共享 |
 | `40058 请求参数不合法` | 正文超长、msgtype 不支持等 | 确认正文长度；text 上限 2048B |
 | 「webhook 地址域名不是企微官方域名」 | 传了第三方域名的 URL | 只用 `qyapi.weixin.qq.com` 的地址 |
 | 提示「未配置企业微信 webhook key」 | 环境变量没生效 | 确认变量已 `export`/`set`，青龙用 `QYWX_KEY` |
@@ -380,10 +385,11 @@ python wecom_notifier.py text "测试" --timeout 20    # ③ 网络慢时延长�
 - key 走环境变量或参数注入，不要硬编码进脚本或提交到仓库。
 - 分享日志时注意：脚本打印的 webhook 已脱敏（只显示 key 前 6 位）；`--dry-run` 打印的请求体里，
   **图片 base64 已替换成体积占位符**，可以放心贴群排查。
-- 机器人限频 20 条/分钟，批量任务务必限速。
+- 机器人限频为滚动 60 秒窗口内 20 条，且**同一 key 的所有进程共享额度**，批量任务务必限速。
 - webhook 域名做了白名单校验，只有 `qyapi.weixin.qq.com` 会被接受。
 
 ---
 
 <sub>配图为 `docs/*.svg`，用 `pwsh docs/build_diagrams.ps1` 重新生成；矢量图在 GitHub 上随深浅色主题自动切换。</sub>
+
 
