@@ -1,10 +1,8 @@
-# wecom_notifier 使用文档
+# wecom_notifier
 
-企业微信群机器人（webhook）推送工具，一个文件覆盖**文本 / 富文本 / 模板卡片 / 图片 / 群文件**五类消息，
-命令行与 Python API 双入口。
+企业微信群机器人（webhook）推送工具。**一个文件，零强制依赖**，覆盖文本 / 富文本 / 模板卡片 / 图片 / 群文件五类消息，命令行和 Python API 双入口。
 
-- 文件：`wecom_notifier.py`（v2.3.0）
-- 依赖：**零强制依赖**，Python 3.8+ 标准库即可运行；`requests`、`Pillow` 为可选增强
+- Python 3.8+ 标准库即可运行；`requests`、`Pillow` 可选增强
 - 适用：告警通知、日报播报、运维提醒、报表与图片分发、青龙面板定时任务
 
 <img src="docs/hero.svg" alt="三种用法：命令行 / Python API / 定时任务" width="880">
@@ -17,55 +15,48 @@ python wecom_notifier.py text "Hello 企业微信"
 
 ## 目录
 
-| 章节 | 解决什么问题 |
+| 章节 | 内容 |
 | --- | --- |
-| [1. 30 秒上手](#1-30-秒上手) | 拿到 key，发出第一条消息 |
-| [2. key 从哪来](#2-key-从哪来) | 五种配置方式与优先级、域名白名单 |
-| [3. 命令行速查](#3-命令行速查) | 五类消息的具体参数 |
-| [4. Python 调用](#4-python-调用) | 嵌进你自己的脚本 |
-| [5. 消息类型与限制](#5-消息类型与限制) | 体积上限、限频、v2.2.0 → v2.3.0 行为变化 |
+| [1. 三步上手](#1-三步上手) | 拿到 key，发出第一条消息 |
+| [2. key 与配置](#2-key-与配置) | 五种来源的优先级、其它环境变量 |
+| [3. 命令行](#3-命令行) | 五类消息的用法与参数 |
+| [4. Python 调用](#4-python-调用) | 类方法、模块函数、返回值与重试 |
+| [5. 限制与实测表现](#5-限制与实测表现) | 体积上限、限频、**真机截图**、v2.2.0 升级差异 |
 | [6. 签名校验](#6-签名校验可选) | 机器人开了「签名校验」怎么办 |
-| [7. 青龙面板部署](#7-青龙面板部署) | 定时任务零配置 |
+| [7. 青龙面板](#7-青龙面板) | 定时任务零配置 |
 | [8. 退出码](#8-退出码) | 调度平台如何判断成败 |
-| [9. 常见问题排查](#9-常见问题排查) | 报错对照表 |
-| [10. 可选依赖](#10-可选依赖) / [11. 安全建议](#11-安全建议) | 收尾两件事 |
+| [9. 排查](#9-排查) | 报错对照表 |
 
 ---
 
-## 1. 30 秒上手
+## 1. 三步上手
 
 ```bash
-# ① 拿到 key：群设置 → 群机器人 → 添加/查看机器人 → Webhook 地址里 ?key= 后面那串
+# ① 拿 key：群设置 → 群机器人 → 添加/查看机器人 → Webhook 地址里 ?key= 后面那串
 #    https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx-xxxx-...
-#                                                          ↑ 这就是 key
 
-# ② 配置 key（任选其一）
+# ② 配 key（任选其一）
 export WECOM_WEBHOOK_KEY="你的-key"              # Linux / macOS
-set WECOM_WEBHOOK_KEY=你的-key                   # Windows CMD
-$env:WECOM_WEBHOOK_KEY="你的-key"                # Windows PowerShell
+set    WECOM_WEBHOOK_KEY=你的-key                 # Windows CMD
+$env:WECOM_WEBHOOK_KEY="你的-key"                 # Windows PowerShell
 
-# ③ 发第一条消息
+# ③ 发第一条
 python wecom_notifier.py text "Hello 企业微信"
 
-# 不确定配没配对？先空跑看看请求体，不会真发消息
+# 不确定配没配对？空跑看请求体，不会真发
 python wecom_notifier.py text "测试" --dry-run -v
 ```
 
-> ⚠️ key 等同于「往这个群发消息的权限」，不要写进公开仓库。
-
-### Windows 中文控制台乱码？
-
-`✅ / ❌ / ⚠️` 在 GBK 控制台下无法编码，v2.3.0 起会自动降级成纯文本，不会崩溃。想看中文与图标：
-
-```powershell
-$env:PYTHONIOENCODING="utf-8"; chcp 65001
-```
+> **key 就是「往这个群发消息」的权限**，别写进公开仓库。
+>
+> Windows 中文控制台乱码是 GBK 编不出 `✅❌⚠️`：v2.3.0 起会自动降级成纯文本不会崩，想看图标执行
+> `$env:PYTHONIOENCODING="utf-8"; chcp 65001`。
 
 ---
 
-## 2. key 从哪来
+## 2. key 与配置
 
-环境变量、命令行参数、青龙面板注入 —— 五种来源按顺序命中即止：
+五种来源按顺序命中即止：
 
 <img src="docs/key-resolution.svg" alt="key 解析优先级：--webhook → --key → WECOM_WEBHOOK → WECOM_WEBHOOK_KEY → QYWX_KEY" width="880">
 
@@ -75,40 +66,42 @@ $env:PYTHONIOENCODING="utf-8"; chcp 65001
 | 2 | `--key` | 只传 key，也可直接传完整地址 |
 | 3 | `WECOM_WEBHOOK` | 完整地址 |
 | 4 | `WECOM_WEBHOOK_KEY` | 只放 key（最常用） |
-| 5 | `QYWX_KEY` | **青龙面板**通知设置自动生成；与第 4 项同级，`WECOM_WEBHOOK_KEY` 存在时优先用它 |
-| — | 以上均未配置 | 打印配置指引，退出码 2；**没有内置 key** |
+| 5 | `QYWX_KEY` | 青龙面板通知设置自动生成；与第 4 项同级，`WECOM_WEBHOOK_KEY` 存在时优先用它 |
+| — | 全都没配 | 打印配置指引，退出码 2；**没有内置 key** |
 
-其它环境变量：
+另外两个环境变量：
 
 | 变量 | 作用 |
 | --- | --- |
 | `WECOM_SECRET` | 机器人安全设置里的「加解密密钥」，设了即启用签名校验 |
-| `WECOM_TIMEOUT` | 单次请求超时秒数，默认 8.0；填非数字会报「配置错误」并退出 2 |
+| `WECOM_TIMEOUT` | 单次请求超时秒数，默认 8.0；填非数字报「配置错误」并退出 2 |
 
-> webhook 地址的域名必须是 `qyapi.weixin.qq.com`，其它域名会被本地直接拒绝，避免 key 泄漏到第三方。
+> webhook 域名必须是 `qyapi.weixin.qq.com`，其它域名本地直接拒绝，避免 key 泄漏给第三方。
 
 ---
 
-## 3. 命令行速查
+## 3. 命令行
 
 ```
 python wecom_notifier.py <子命令> [内容/路径] [公共参数]
 ```
 
-### 公共参数（每个子命令都支持）
+公共参数：
 
 | 参数 | 说明 |
 | --- | --- |
-| `--key` | webhook key，也可传完整 URL |
-| `--webhook` | 完整 webhook 地址，优先级高于 `--key` |
-| `--secret` | 启用签名校验（值取机器人安全设置里的密钥） |
+| `--key` / `--webhook` | 见 [2. key 与配置](#2-key-与配置)，`--webhook` 优先 |
+| `--secret` | 启用签名校验 |
 | `--timeout` | 请求超时秒数 |
-| `--max-bytes` | markdown 正文字节上限，超出截断（默认 4096） |
-| `--image-max-bytes` | 图片 base64 上限（默认 2MB） |
-| `--rate SEC` | 两次发送的最小间隔秒数；批量推送建议 `4`（滚动窗口 20 条/分钟，留 30% 余量） |
-| `--dry-run` | 只打印请求体，不真正发送 |
+| `--max-bytes` | markdown 正文字节上限，默认 4096 |
+| `--image-max-bytes` | 图片 base64 上限，默认 2MB |
+| `--rate SEC` | 两次发送的最小间隔秒数；**批量推送用 `4`**（限频是滚动窗口，详见 [5](#5-限制与实测表现)） |
+| `--dry-run` | 只打印请求体，不发送 |
 | `-v, --verbose` | 打印目标 webhook（脱敏） |
 | `--version` | 打印版本号 |
+
+**内容参数三种写法**：字面文本；`-` 从 stdin 读；`@路径` 从 UTF-8 文件读。
+`@` 开头但文件不存在时仍按字面发送，方便直接发 `@all`。
 
 ### 3.1 text — 纯文本
 
@@ -118,21 +111,20 @@ python wecom_notifier.py text "请值班同学处理" --mention zhangsan --menti
 python wecom_notifier.py text "紧急" --mention-mobile 13800000000
 ```
 
-正文上限 **2048 字节**（企微 text 类型硬限制），超限自动截断并打印警告，不受 `--max-bytes` 放大影响。
+上限 **2048 字节**（企微 text 硬限制），超限自动截断并告警，`--max-bytes` 放大不了。
 
-### 3.2 markdown — 富文本卡片
+### 3.2 markdown — 富文本
 
-默认 `markdown_v2`（支持标题、列表、表格、引用、加粗）；`--v1` 切旧版（兼容性最好）。
+默认 `markdown_v2`（支持标题、列表、表格、引用）；`--v1` 切旧版（兼容性最好但**不渲染列表和表格**，见 [5.1](#51-markdown_v2-与-v1-的真实差别)）。
 
 ```bash
 # 真换行：用 printf / $'...' / heredoc，别写 "\n"（那是字面反斜杠加 n）
 printf '# 日报\n- 样本 155\n- **耗时** 0.7s' | python wecom_notifier.py markdown -
 python wecom_notifier.py markdown $'# 日报\n- **耗时** 0.7s'          # bash / zsh
 python wecom_notifier.py markdown @report.md                            # 从文件读（最省事）
-python wecom_notifier.py markdown --v1 "# 兼容旧客户端"
 ```
 
-正文上限 **4096 字节**（`--max-bytes` 可调）。
+上限 **4096 字节**，`--max-bytes` 可调。
 
 ### 3.3 card — 模板卡片
 
@@ -140,111 +132,92 @@ python wecom_notifier.py markdown --v1 "# 兼容旧客户端"
 python wecom_notifier.py card "扫描完成" \
   --desc "2026-09-05 收盘" \
   --item 样本=155 --item 耗时=0.7s --item 命中=12 \
-  --source "板块扫描器" \
-  --url "https://gu.qq.com"
+  --source "板块扫描器" --url "https://gu.qq.com"
 ```
 
-- `--item` 可重复，**最多 6 项**，超过会直接报错（不再静默丢弃）
-- `--url` 省略时用官方兜底链接 `https://work.weixin.qq.com/`
-- 标题不能为空
-- 当前只封装 `text_notice` 卡片；`button_interaction` / `news_notice` 字段结构不同，请用 `bot.send(payload)` 自行构造
+- `--item` 可重复，**最多 6 项**，超了直接报错（不再静默丢弃）
+- 标题不能为空；`--url` 省略时用官方兜底链接
+- 只封装了 `text_notice`；`button_interaction` / `news_notice` 字段结构不同，用 `bot.send(payload)` 自己构造
 
-### 3.4 image — 图片（JPEG/PNG）
+### 3.4 image — 图片
 
 ```bash
 python wecom_notifier.py image ./chart.png
-python wecom_notifier.py image a.png b.jpg --rate 3      # 多图批量，自动限速
-python wecom_notifier.py image big.png --no-compress     # 超限直接报错，不自动压缩
+python wecom_notifier.py image a.png b.jpg --rate 4      # 多图批量，自动限速
+python wecom_notifier.py image big.png --no-compress     # 超限直接报错，不压缩
 ```
 
-- 类型按**文件头魔数**判定，扩展名是 `.png` 但实际是 webp 的文件会在本地被拦下
-- 超过 2MB 自动降质 + 缩放（需要 `pip install pillow`）；PNG 降不动时会自动转 JPEG 再压
-- 未装 Pillow 则报错并提示
+- 类型按**文件头魔数**判定，扩展名是 `.png` 实际是 webp 的会在本地拦下
+- 超过 2MB 自动降质 + 缩放（需 `pip install pillow`）；PNG 降不动会自动转 JPEG 再压
 
-### 3.5 file — 群文件（5B~20MB）
+### 3.5 file — 群文件
 
 ```bash
 python wecom_notifier.py file ./report.html
 python wecom_notifier.py file ./data.xlsx --name "2026-09-05 数据.xlsx"
 ```
 
-群里显示为文件卡片（图标 + 文件名 + 大小），**点开是下载**，不是内置预览；HTML / PDF 下载后交给
-系统浏览器或阅读器打开。media_id 3 天内有效，且只能由上传它的机器人使用。
-体积在读取前用文件属性判定，不会为了判断大小先把 20MB 读进内存。
-
-### 3.6 内容参数的三种写法
-
-| 写法 | 含义 | 示例 |
-| --- | --- | --- |
-| 字面内容 | 直接写文本 | `... text "hello"` |
-| `-` | 从 stdin 读 | `cat report.md \| ... markdown -` |
-| `@文件路径` | 从文件读（UTF-8） | `... markdown @report.md` |
-
-> `@` 开头但文件不存在时，仍按字面文本发送，方便发 `@all` 这类内容。
+体积 5B ~ 20MB，读取前先用文件属性判定大小，不会为了量体积把 20MB 读进内存。
+**群里显示成文件卡片，点开是下载不是预览**——详见 [5.3](#53-图片与群文件的真实表现)。
 
 ---
 
 ## 4. Python 调用
 
-### 4.1 客户端类（推荐）
+### 4.1 客户端类
 
 ```python
 from wecom_notifier import WeComBot
 
 bot = WeComBot(key="你的-key")          # 省略 key 则读环境变量
-# bot = WeComBot(key="...", secret="...", timeout=10.0, min_interval=3.0)
+result = bot.send_markdown("# 标题\n- **加粗**")
 
-result = bot.send_markdown("# 标题\n- **加粗**\n1. 有序列表")   # 这里是真换行
-if result:                              # SendResult 可直接当 bool 用
+if result:                              # SendResult 可直接当 bool
     print("发送成功")
 else:
     print("失败", result.errcode, result.errmsg, "可重试:", result.retryable)
 ```
 
-全部方法：
-
 | 方法 | 说明 |
 | --- | --- |
-| `send_text(content, mentioned_list=None, mentioned_mobile_list=None)` | 纯文本，可 @人；正文按 2048B 截断 |
+| `send_text(content, mentioned_list=None, mentioned_mobile_list=None)` | 纯文本，可 @人 |
 | `send_markdown(content, msgtype=None)` | 富文本，`msgtype` 取 `markdown_v2` / `markdown` |
-| `send_template_card(title, desc, items, source_desc, url, card_type="text_notice")` | 模板卡片，`items=[(k, v), ...]`，最多 6 项 |
+| `send_template_card(title, desc, items, source_desc, url, card_type="text_notice")` | 卡片，`items=[(k, v), ...]`，最多 6 项 |
 | `send_image(path)` | 本地图片，自动压缩；也可传 `base64_data` + `md5` |
 | `send_file(local_path, filename=None)` | 群文件 |
-| `send(payload)` | 发送任意合法 payload（news 等未封装类型） |
+| `send(payload)` | 任意合法 payload（news 等未封装类型） |
 
-每个方法都带 `dry_run=False` 参数，置 True 只打印请求体不发送（图片 dry-run 连压缩都跳过）。
+以上方法都带 `dry_run=False`，置 True 只打印请求体（图片连压缩都跳过）。
 
-构造参数补充：
+构造参数：`key` / `webhook` / `secret` / `timeout=8.0` / `min_interval=0.0` / `max_bytes=4096` / `image_max_bytes=2MB`。
+`min_interval` 是两次发送的最小间隔，批量推送设 `4.0` 可自动规避限频。
 
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `min_interval` | `0.0` | 两次发送最小间隔秒数，批量推送设 `3.0` 可自动规避限频 |
-| `max_bytes` | `4096` | markdown 上限；text 另有 2048 硬上限 |
-| `image_max_bytes` | `2MB` | 图片 base64 上限 |
+### 4.2 模块级函数
 
-### 4.2 模块级函数（一行调用，返回 `(ok, err)`）
+一行调用，返回 `(ok, err)`：
 
 ```python
 from wecom_notifier import send_text, send_markdown, send_image, send_file
 
 ok, err = send_markdown("# 日报")
 ok, err = send_image("./chart.png", key="你的-key")
-ok, err = send_file("./report.html")
 if not ok:
     print("推送失败:", err)
 ```
 
 ### 4.3 返回值与重试
 
-一次发送会经过四个阶段，失败一律收敛成返回值，不会把异常抛给调用方：
-
 <img src="docs/send-pipeline.svg" alt="发送链路：解析 key → 构造 payload → 节流与签名 → 发送与错误收敛" width="880">
 
-- 类方法 → `SendResult(ok, errcode, errmsg, status)`，支持 `if result:` 判断
-- 模块级函数 → `(ok, err)` 元组，成功时 `err` 为空串
-- **任何错误都不抛异常**：网络异常、接口错误、输入不合法（文件不存在、格式不支持、超限、卡片项数超 6、payload 缺 msgtype）一律返回失败 `SendResult`。`WeComError` 只在**构造 `WeComBot`** 时抛出（key 缺失、域名不符、超时非数字）
-- `SendResult.retryable`：`True` 表示值得重试（网络异常 / 45009 限频 / HTTP 5xx）
-- `SendResult.status`：HTTP 状态码，有响应时才有值
+**任何发送阶段的错误都不抛异常**：网络异常、接口报错、参数不合法（文件不存在、格式不支持、超限、卡片超 6 项、payload 缺 msgtype）一律返回失败的 `SendResult`。
+`WeComError` 只在**构造 `WeComBot`** 时抛（key 缺失、域名不符、超时非数字）。
+
+| 字段 | 含义 |
+| --- | --- |
+| `ok` / `bool(result)` | 是否成功 |
+| `errcode` / `errmsg` | 企微返回码与文案；`errmsg` 已附排查链接 |
+| `retryable` | 值得重试：网络异常、45009 限频、HTTP 5xx |
+| `status` | HTTP 状态码，有响应时才有值 |
 
 ```python
 import time
@@ -258,88 +231,94 @@ for attempt in range(3):
 
 ---
 
-## 5. 消息类型与限制
+## 5. 限制与实测表现
 
 <img src="docs/message-types.svg" alt="五类消息与各自上限" width="880">
 
-| 类型 | 体积上限 | 格式要求 | 备注 |
+| 类型 | 上限 | 格式 | 备注 |
 | --- | --- | --- | --- |
-| text | 2048 字节 | 纯文本 | 超限自动截断（v2.3.0 起按此上限收口） |
-| markdown / markdown_v2 | 4096 字节 | markdown | v2 支持列表/表格/引用；`--max-bytes` 可调 |
-| template_card | — | key-value，≤ 6 项 | 结构化展示，标题必填 |
-| image | base64 后 ≤ 2MB | **仅 JPEG / PNG**（按魔数判定） | 超限自动压缩（需 Pillow） |
-| file | 5B ~ 20MB | 任意 | 走 upload_media，**不内联预览**，点击下载后由系统浏览器打开 |
+| text | 2048 字节 | 纯文本 | 超限自动截断 |
+| markdown / v2 | 4096 字节 | markdown | `--max-bytes` 可调 |
+| template_card | — | key-value ≤ 6 项 | 标题必填 |
+| image | base64 ≤ 2MB | 仅 JPEG / PNG（按魔数判定） | 超限自动压缩，需 Pillow |
+| file | 5B ~ 20MB | 任意 | 不内联预览 |
 
-**限频**：每个机器人 **滚动 60 秒窗口内最多 20 条**。v2.3.0 起可用 `--rate 4` 或 `min_interval=4.0`
-自动节流（实测连发 5 条零失败）；超限返回 `errcode=45009`，
-错误信息会明确提示「已触发限频」，且 `retryable=True`。
+**限频：滚动 60 秒窗口内最多 20 条，且同一 key 的所有进程共享这个窗口。**
+不是「每分钟清零一次」——实测未节流连发 22 条，第 1–13 条成功、第 14–22 条全部 `45009`，
+因为前一轮已经把窗口额度吃掉一半。所以别按 20 条卡点，用 `--rate 4` 留 30% 余量。
 
-> ⚠️ 额度是**共享的滚动窗口**，不是「每分钟清零一次」。实测未节流连发 22 条时，
-> 第 1–13 条成功、第 14–22 条全部 45009 —— 因为前一轮测试已经消耗了窗口内的额度。
-> 所以不要按「每 60 秒发 20 条」卡点，**留 30% 余量**，用 `--rate 4` 更稳。
+<figure>
+  <img src="docs/img/06-card-news-image-file.png" alt="卡片、news、图片、文件连续推送时的实际排列" width="270">
+  <figcaption>实测：连续推送时卡片 / news / 图片 / 文件的排列。图片和文件要先上传，比 text 慢，批量时会「迟到」，不是乱序 bug。</figcaption>
+</figure>
 
-### 5.1 markdown_v2 客户端实测渲染
+以下结论全部来自**企业微信 Android 客户端真机截图核对**，不是照抄官方文档。
 
-以下结论来自 **企业微信 Android 客户端（2026-10 版本）** 真机截图核对，不是照抄官方文档：
+### 5.1 markdown_v2 与 v1 的真实差别
 
-| 语法 | markdown_v2 | markdown（v1 旧版） |
+同一份内容，左 `markdown_v2`、右 `markdown`：
+
+<p align="center">
+  <img src="docs/img/01-markdown-v2.png" alt="markdown_v2 真机渲染：标题、列表、嵌套、引用、表格全部生效" width="300">
+  <img src="docs/img/02-markdown-v1.png" alt="markdown v1 真机渲染：列表带短横线、表格退化成竖线文本" width="300">
+</p>
+
+看右图底部：`| 列A | 列B |` 和 `| --- | --- |` 被原样打印，`- 无序列表项一` 只是个带短横线的普通段落。
+
+| 语法 | v2 | v1 |
 | --- | --- | --- |
-| `# / ## / ###` 标题 | ✅ 渲染，字号递减 | ✅ 渲染 |
-| `**加粗**` | ✅ | ✅ |
-| `*斜体*` | ✅ | ✅ |
-| `~~删除线~~` | ✅ | ✅ |
-| `` `行内代码` `` | ✅ 灰底 | ✅ 灰底 |
-| `- 无序列表` / 嵌套 `  -` | ✅ 圆点，**嵌套层级正确缩进** | ⚠️ 原样输出 `- 项`，无圆点 |
-| `1. 有序列表` | ✅ 自动编号 | ⚠️ 原样输出 `1. ` |
-| `> 引用` 多行 | ✅ 左侧竖线 + 灰底，**多行会被合并成一段** | ⚠️ 只有竖线，无底色 |
-| `\| 表格 \|` | ✅ **渲染成真表格**（表头灰底、有边框、列宽自适应） | ❌ 原样输出 `\|列A\|列B\|` 竖线文本 |
-| `[文字](url)` | ✅ 蓝色可点 | ✅ 蓝色可点 |
-| `---` 分割线 | ✅ | ✅ |
+| `#` `##` `###` 标题 | ✅ 字号递减 | ✅ |
+| `**加粗**` `*斜体*` `~~删除~~` `` `代码` `` | ✅ | ✅ |
+| `-` 无序 / 嵌套 | ✅ 圆点 + 正确缩进 | ⚠️ 原样输出 `- 项` |
+| `1.` 有序 | ✅ 自动编号 | ⚠️ 原样输出 `1. ` |
+| `>` 引用 | ✅ 竖线 + 灰底（多行合并成一段） | ⚠️ 只有竖线 |
+| `\| 表格 \|` | ✅ 真表格，表头灰底、列宽自适应 | ❌ 原样输出竖线文本 |
+| `[文字](url)` `---` | ✅ | ✅ |
 
-> **结论：只要内容里有表格或有序/无序列表，必须用 `markdown_v2`。** v1 会把这些原样吐出来，
-> 群里看到的是一堆 `|` 和 `-`。v1 唯一的优势是全客户端版本兼容。
+**结论：内容里有表格或列表就必须用 `markdown_v2`。** v1 只适合「只需要标题和换行」的场合。
 
-**社区版之前踩的坑**：markdown 里写 `\n` 两个字符是**字面反斜杠 n**，不会换行，实测发出去就是
-`# 日报\n- 样本`。要换行必须是真实换行符——命令行用 `printf`、`$'...'` 或 heredoc，别用双引号字符串。
+### 5.2 模板卡片
 
-### 5.2 模板卡片实测表现
+<img src="docs/img/03-card.png" alt="模板卡片真机渲染：source 在顶部，key-value 六项，长值省略号截断" width="270">
 
-- `main_title.desc` 里的换行、`horizontal_content_list` 里的 `\n` **都能正常换行**（`含换行` 项实测两行正常）。
-- 单行 `value` 超长会**右侧省略号截断**（实测 `这是一段比较长的值用来测试换行与截…`），换行后同样限制在约 2 行高。
-  所以 `value` 里放长 URL 会被截断——URL 应该放 `card_action.url`，不是塞进 key-value。
-- `source.desc` 显示在卡片最上方，字号小、灰色，适合放服务名。
-- 卡片**没有消息头像气泡的蓝条**，是独立卡片样式，视觉上比 text/markdown 更醒目。
+- `desc` 和 `items` 的 `\n` **都能正常换行**（上图「含换行」项占两行）
+- **单个 value 超长会被省略号截断**（「长值」项），换行后最多约两行——所以长 URL 别塞 key-value，放 `card_action.url`
+- `source.desc` 显示在卡片顶部，灰色小字，适合放服务名
+- 卡片是独立样式，没有 text / markdown 那条头像蓝条，视觉更醒目
 
-### 5.3 图片与文件实测表现
+### 5.3 图片与群文件的真实表现
 
-- **图片**：大图会被压成小缩略图（实测 2400×1350 的 PNG 在高频噪声下压缩后，群里显示约 200px 宽）。
-  这是企微客户端自己的缩略图行为，不是本工具的压缩。点开才是原尺寸。
-  > 压缩是真的在压：6.7MB 噪声 PNG（base64 ≈ 9MB）走 PNG → JPEG 回退后成功送达，但视觉上损失明显。
-  > **需要保真的图，请自己先压到 2MB base64 以内，别依赖自动压缩。**
-- **文件**：`upload_media` 上传的群文件在群里显示为**文件卡片 + 大小 + 图标，不会内联预览**。
-  HTML 文件点击后是**弹下载 / 由系统浏览器打开**，**不是**在企微内置浏览器里渲染。
-  想让 HTML 直接预览得用 markdown 里的链接指向可访问的 URL，没有别的办法。
-- **图片消息的顺序**：图片和文件都要先走一次上传/编码，比 text 慢，批量推送时它们会「迟到」，
-  这是正常的，不是乱序 bug。
+<img src="docs/img/04-news-image-file.png" alt="news 图文、图片缩略图、群文件卡片在群里的实际样子" width="270">
 
-### 5.4 超长截断的客户端表现
+- **图片**：大图在群里被压成小缩略图（实测 2400×1350 PNG 显示只有约 200px 宽，里面文字糊掉），点开才是原尺寸。
+  自动压缩确实在工作（6.7MB 噪声 PNG 走 PNG → JPEG 回退后成功送达），但**视觉损失明显**——
+  要保真就自己先压到 2MB base64 以内，别依赖自动压缩。
+- **群文件**：显示成「图标 + 文件名 + 大小」的卡片，**点开是下载，不是内置浏览器预览**。
+  想让 HTML 直接可看，只能用 markdown 里的链接指向一个可访问的 URL。
+- **news**：`send(payload)` 发出去就是图文卡片，`picurl` 为空时顶部是灰色占位图，不影响标题和描述。
+  能不用就不用，markdown 和 template_card 更省事。
+- **@人**：`mentioned_list=["@all"]` 显示为「@所有人」。
 
-截断后的 text 在群里会以 `…（内容过长已截断）` 收尾（实测可见，换行隔开）。
-`_truncate` 会**优先在换行处收尾**，避免把 markdown 结构切一半——但纯中文长段落没有换行时
-只能硬切，此时可能出现半个词。需要结构化截断就自己 `content[:n] + "……"` 再发。
+### 5.4 超长截断
 
-### 从 v2.2.0 升级
+<img src="docs/img/05-truncate.png" alt="超长 text 被截断后，群里以“…（内容过长已截断）”收尾" width="270">
 
-| 项 | v2.2.0 行为 | v2.3.0 行为 |
+截断的 text 会以 `…（内容过长已截断）` 收尾，群里看得见。
+`_truncate` 优先在换行处收尾，避免把 markdown 结构切一半；纯中文长段落没有换行时只能硬切，可能出现半个词。
+需要结构化截断就自己 `content[:n] + "……"` 再发。
+
+### 5.5 从 v2.2.0 升级
+
+| 项 | v2.2.0 | v2.3.0 |
 | --- | --- | --- |
-| 签名 timestamp | 构造对象时算一次，长驻进程复用导致过期 | 每次请求前现算 |
-| text 长度 | 与 markdown 共用 4096 | 独立收口到 2048 |
-| 超长截断 | 静默截断 | 截断并打印警告，尽量在换行处收尾 |
-| 卡片超过 6 项 | 静默丢弃 | 直接报错 |
+| 签名 timestamp | 构造时算一次，长驻进程会过期 | 每次请求前现算 |
+| text 长度 | 与 markdown 共用 4096 | 独立收口 2048 |
+| 超长截断 | 静默 | 告警 + 尽量在换行处收尾 |
+| 卡片超 6 项 | 静默丢弃 | 直接报错 |
 | 图片 dry-run | 仍做完整压缩 | 只校验类型 |
-| PNG 大图压缩 | 只缩放不降质，容易压不下去 | 降不动时转 JPEG 重试 |
-| `WECOM_TIMEOUT` 非法 | 裸抛 ValueError + traceback | 转成「配置错误」退出码 2 |
-| Windows GBK 控制台 | emoji 触发 UnicodeEncodeError 崩溃 | 自动降级为纯文本输出 |
+| PNG 大图 | 只缩放不降质 | 降不动转 JPEG 重试 |
+| `WECOM_TIMEOUT` 非法 | 裸抛 ValueError | 「配置错误」退出码 2 |
+| Windows GBK 控制台 | emoji 崩溃 | 自动降级纯文本 |
 
 完整改动见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -347,100 +326,88 @@ for attempt in range(3):
 
 ## 6. 签名校验（可选）
 
-机器人安全设置若开启了「签名校验」，需要带上密钥：
+机器人安全设置开了「签名校验」才需要：
 
 ```bash
 python wecom_notifier.py text "带签名的消息" --secret "你的-加解密密钥"
-export WECOM_SECRET="你的-加解密密钥"          # 或放环境变量
 ```
 
 ```python
 bot = WeComBot(key="...", secret="...")
 ```
 
-脚本会在**每次请求前**追加 `timestamp` 与 `msg_signature`
-（算法：`Base64(HMAC-SHA256(key=secret, msg=timestamp + "\n" + secret))`）。
-由于签名对时间新鲜度敏感，长驻进程请**复用同一个 `WeComBot` 实例**，它每次发送都会重算 timestamp。
-
-> 未开启签名校验的机器人不要传 `--secret`，否则会报错。
+每次请求前重算 `timestamp` 与 `msg_signature`（`Base64(HMAC-SHA256(secret, timestamp + "\n" + secret))`）。
+签名对时间敏感，长驻进程请**复用同一个 `WeComBot` 实例**。
+未开启签名校验的机器人不要传 `--secret`，会报错。
 
 ---
 
-## 7. 青龙面板部署
+## 7. 青龙面板
 
-1. 把 `wecom_notifier.py` 放到青龙 scripts 目录（如 `/ql/data/scripts/`）。
-2. 依赖管理（可选）：
-   - 推荐在面板「依赖管理 → Python3」里添加 `requests`（发大图再加 `pillow`）
-   - 或容器内执行 `pip3 install requests pillow`
-3. 在「系统设置 → 通知设置 → 企业微信机器人」填 key，青龙会存成环境变量 `QYWX_KEY`，**脚本自动读取，无需再传 key**。
-4. 新建任务，命令示例：
+1. `wecom_notifier.py` 放进 scripts 目录（如 `/ql/data/scripts/`）
+2. 依赖（可选）：面板「依赖管理 → Python3」加 `requests`（发大图再加 `pillow`），或容器内 `pip3 install requests pillow`
+3. 「系统设置 → 通知设置 → 企业微信机器人」填 key，青龙存成 `QYWX_KEY`，**脚本自动读取，不用再传 key**
+4. 新建任务：
 
 ```bash
 python3 /ql/data/scripts/wecom_notifier.py text "定时任务执行完毕"
 python3 /ql/data/scripts/wecom_notifier.py markdown @/ql/data/scripts/report.md
-python3 /ql/data/scripts/wecom_notifier.py image /ql/data/repo/chart.png --rate 3
+python3 /ql/data/scripts/wecom_notifier.py image /ql/data/repo/chart.png --rate 4
 ```
 
 ---
 
 ## 8. 退出码
 
-| 退出码 | 含义 |
+| 码 | 含义 |
 | --- | --- |
-| 0 | 全部推送成功 |
-| 1 | 有一条或多条推送失败 |
-| 2 | 配置或输入错误（webhook 缺 key、域名不符、超时非数字、内容文件读失败、卡片参数非法等） |
-
-调度平台可根据退出码判断是否告警。
+| 0 | 全部成功 |
+| 1 | 有一条或多条失败 |
+| 2 | 配置或输入错误（缺 key、域名不符、超时非数字、文件读失败、卡片参数非法等） |
 
 ---
 
-## 9. 常见问题排查
+## 9. 排查
 
-| 现象 / errcode | 原因 | 处理 |
+| 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| `93000 invalid webhook url` | key 填错、失效，或机器人已被移除 | 核对群机器人 Webhook 地址里的 key |
-| `45009 api freq out of limit` | 滚动 60 秒窗口内超过 20 条 | 加 `--rate 4` 或 `min_interval=4.0`；额度会跨进程共享 |
-| `40058 请求参数不合法` | 正文超长、msgtype 不支持等 | 确认正文长度；text 上限 2048B |
-| 「webhook 地址域名不是企微官方域名」 | 传了第三方域名的 URL | 只用 `qyapi.weixin.qq.com` 的地址 |
-| 提示「未配置企业微信 webhook key」 | 环境变量没生效 | 确认变量已 `export`/`set`，青龙用 `QYWX_KEY` |
-| 提示「环境变量 WECOM_TIMEOUT 不是合法数字」 | 变量填了非数字 | 改成秒数（如 `8`）或删掉该变量 |
-| 图片报「文件内容不是有效 JPEG/PNG」 | 实际是 webp/gif，或扩展名造假 | 先转成真正的 JPG/PNG |
-| 图片报「未安装 Pillow 无法自动压缩」 | 大图超过 2MB | `pip install pillow`，或先把图压到 2MB 内 |
-| 群文件报「低于 5B 下限 / 超过 20MB 上限」 | 文件体积不合规 | 压缩或分包 |
-| 卡片报「最多 6 项」 | `--item` 传多了 | 精简到 6 项以内，或拆成多张卡片 |
-| Windows 控制台输出问号/乱码 | GBK 编码无法显示中文图标 | `$env:PYTHONIOENCODING="utf-8"; chcp 65001` |
-| 其它 errcode | — | 失败返回值里的 `errmsg` 已附带官方排查链接 `open.work.weixin.qq.com/devtool/query?e=<errcode>` |
+| `93000 invalid webhook url` | key 填错/失效，或机器人被移除 | 核对 Webhook 里的 key |
+| `45009 api freq out of limit` | 滚动 60 秒窗口超 20 条 | 加 `--rate 4`；额度跨进程共享 |
+| `40058 请求参数不合法` | 正文超长或 msgtype 不支持 | 确认长度；text 上限 2048B |
+| 「域名不是企微官方域名」 | 传了第三方 URL | 只用 `qyapi.weixin.qq.com` |
+| 「未配置企业微信 webhook key」 | 环境变量没生效 | 确认已 export/set，青龙用 `QYWX_KEY` |
+| 「WECOM_TIMEOUT 不是合法数字」 | 填了非数字 | 改成秒数如 `8`，或删掉 |
+| 「文件内容不是有效 JPEG/PNG」 | 实际是 webp/gif 或扩展名造假 | 先转成真正的 JPG/PNG |
+| 「未安装 Pillow 无法自动压缩」 | 大图超 2MB | `pip install pillow`，或先自己压 |
+| 群文件「低于 5B / 超过 20MB」 | 体积不合规 | 压缩或分包 |
+| 卡片「最多 6 项」 | `--item` 传多了 | 精简或拆卡 |
+| 群里看到 `- 项`、表格变成竖线 | 用了 v1，它不渲染列表表格 | 换 `markdown_v2` |
+| 卡片里 URL 点不了 | value 超长被截断 | URL 放 `card_action.url` |
+| HTML 群文件想直接看 | 群文件只下载不预览 | 用 markdown 链接指向可访问 URL |
+| 图片很糊 | 客户端缩略图 + 自动压缩双损失 | 自己先压到 2MB 以内 |
+| 其它 errcode | — | `errmsg` 已附 `open.work.weixin.qq.com/devtool/query?e=<errcode>` |
 
 调试三板斧：
 
 ```bash
-python wecom_notifier.py text "测试" --dry-run -v    # ① 看请求体与目标地址（不发消息）
-python wecom_notifier.py text "测试" -v              # ② 真实发送并看脱敏地址
+python wecom_notifier.py text "测试" --dry-run -v    # ① 看请求体与目标地址，不发
+python wecom_notifier.py text "测试" -v              # ② 真发并看脱敏地址
 python wecom_notifier.py text "测试" --timeout 20    # ③ 网络慢时延长超时
 ```
 
 ---
 
-## 10. 可选依赖
+## 10. 可选依赖与安全
 
-| 包 | 缺失时的表现 | 安装 |
+| 包 | 缺失时 | 安装 |
 | --- | --- | --- |
-| `requests` | 自动回退标准库 `urllib`，功能不受影响 | `pip install requests`（用线程内 Session 复用连接池） |
-| `Pillow` | 图片超 2MB 时无法自动压缩，会报错 | `pip install pillow` |
+| `requests` | 回退标准库 `urllib`，功能不受影响 | `pip install requests`（线程内 Session，连接池复用） |
+| `Pillow` | 图片超 2MB 无法自动压缩，报错 | `pip install pillow` |
+
+- key 走环境变量或参数，别硬编码进脚本、别提交到仓库
+- 日志里的 webhook 已脱敏（只留 key 前 6 位）；`--dry-run` 打印的图片 base64 已替换成体积占位符，可以放心贴群
+- 域名白名单：只有 `qyapi.weixin.qq.com` 会被接受
 
 ---
 
-## 11. 安全建议
-
-- key 走环境变量或参数注入，不要硬编码进脚本或提交到仓库。
-- 分享日志时注意：脚本打印的 webhook 已脱敏（只显示 key 前 6 位）；`--dry-run` 打印的请求体里，
-  **图片 base64 已替换成体积占位符**，可以放心贴群排查。
-- 机器人限频为滚动 60 秒窗口内 20 条，且**同一 key 的所有进程共享额度**，批量任务务必限速。
-- webhook 域名做了白名单校验，只有 `qyapi.weixin.qq.com` 会被接受。
-
----
-
-<sub>配图为 `docs/*.svg`，用 `pwsh docs/build_diagrams.ps1` 重新生成；矢量图在 GitHub 上随深浅色主题自动切换。</sub>
-
-
+<sub>矢量配图在 `docs/*.svg`，用 `pwsh docs/build_diagrams.ps1` 重新生成，GitHub 上随深浅色主题自动切换；真机截图在 `docs/img/`。</sub>
